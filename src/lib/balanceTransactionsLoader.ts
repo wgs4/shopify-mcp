@@ -137,6 +137,17 @@ export async function fetchBalanceTransactions(
   let lastEndCursor: string | null = opts.startCursor ?? null;
   let truncated = false;
   let capped = false;
+  const expectedPayoutIdNum = Number.parseInt(opts.legacyPayoutId, 10);
+  if (!Number.isFinite(expectedPayoutIdNum)) {
+    throw new Error(
+      `Invalid legacyPayoutId for REST query: ${opts.legacyPayoutId}`,
+    );
+  }
+
+  // Guards: detect repeated cursors and zero-progress pages so a misbehaving
+  // Shopify response can't drive an infinite loop or duplicate-row inflation.
+  const seenCursors = new Set<string>();
+  if (opts.startCursor) seenCursors.add(opts.startCursor);
 
   while (nextUrl) {
     const remaining = opts.maxTransactions - transactions.length;
@@ -169,16 +180,41 @@ export async function fetchBalanceTransactions(
     fetchedPages += 1;
     const data = (await res.json()) as RestBalanceTxnsResponse;
 
+    // Defensive: Shopify shouldn't ever return a non-array, but trust nothing.
+    if (!Array.isArray(data?.transactions)) {
+      throw new Error(
+        "Shopify REST balance/transactions returned unexpected shape (missing `transactions` array)",
+      );
+    }
+
+    // Validate every row belongs to the requested payout. If Shopify ever
+    // misroutes or the caller-supplied cursor was from a different payout,
+    // this hard-fails rather than silently mixing books.
+    const beforeLen = transactions.length;
     for (const t of data.transactions) {
+      if (t.payout_id !== expectedPayoutIdNum) {
+        throw new Error(
+          `Shopify REST returned a transaction (id ${t.id}) with payout_id ${t.payout_id} but we asked for payout_id ${expectedPayoutIdNum}. Refusing to mix books.`,
+        );
+      }
       transactions.push(restTxnToNormalized(t));
       if (transactions.length >= opts.maxTransactions) break;
     }
+    const pageRowsAdded = transactions.length - beforeLen;
 
     const linkHeader = res.headers.get("link") ?? res.headers.get("Link");
     const nextLink = parseNextLink(linkHeader);
 
     if (nextLink) {
       lastEndCursor = extractPageInfo(nextLink);
+    }
+
+    // No-progress guard: a Link-next that returned zero new rows would loop
+    // forever. Treat as truncated and break.
+    if (nextLink && pageRowsAdded === 0) {
+      truncated = true;
+      capped = false;
+      break;
     }
 
     if (!nextLink) {
@@ -200,6 +236,17 @@ export async function fetchBalanceTransactions(
       capped = true;
       break;
     }
+
+    // Repeated-cursor guard: if Shopify's Link header points back to a cursor
+    // we've already followed, abort rather than spin.
+    const nextCursor = extractPageInfo(nextLink);
+    if (nextCursor && seenCursors.has(nextCursor)) {
+      throw new Error(
+        `Shopify REST returned a repeated page_info cursor (${nextCursor}) — refusing to loop. ` +
+          "Likely a Shopify-side bug; retry the request or page manually.",
+      );
+    }
+    if (nextCursor) seenCursors.add(nextCursor);
 
     nextUrl = nextLink;
   }
