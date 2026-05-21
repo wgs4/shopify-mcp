@@ -104,6 +104,12 @@ export class ShopifyAuth {
         this.accessToken
       );
     }
+
+    // Keep process.env in sync for code paths that fetch directly (e.g. the
+    // REST balance/transactions endpoint used by the payout loader). Without
+    // this, long-running MCPs would have a fresh GraphQL client but stale env
+    // 24h after startup.
+    process.env.SHOPIFY_ACCESS_TOKEN = this.accessToken;
   }
 
   private scheduleRefresh(): void {

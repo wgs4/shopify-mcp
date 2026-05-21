@@ -1,16 +1,15 @@
 import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { handleToolError, type ShopifyConnection } from "../lib/toolUtils.js";
+import { handleToolError } from "../lib/toolUtils.js";
 import {
   computeBreakdownTotals,
   explainPayoutAccessError,
-  formatBalanceTxnNode,
   formatPayoutNode,
   parsePayoutId,
-  type RawBalanceTxnNode,
   type RawPayoutNode,
 } from "../lib/payoutHelpers.js";
+import { fetchBalanceTransactions } from "../lib/balanceTransactionsLoader.js";
 
 const GetShopifyPayoutInputSchema = z.object({
   payout_id: z
@@ -24,6 +23,13 @@ const GetShopifyPayoutInputSchema = z.object({
     .describe(
       "If true (default), also fetch the per-order breakdown via balanceTransactions.",
     ),
+  auto_paginate: z
+    .boolean()
+    .default(true)
+    .describe(
+      "If true (default), walk balance_transactions pages until either hasNextPage=false or `max_transactions` is hit. " +
+        "Set false to fetch a single page only (PR #2 behavior) and page manually via `transactions_after`.",
+    ),
   transactions_limit: z
     .number()
     .int()
@@ -31,15 +37,31 @@ const GetShopifyPayoutInputSchema = z.object({
     .max(250)
     .default(250)
     .describe(
-      "Max balance transactions to fetch in one page (Shopify caps at 250). " +
-        "Most Shopify payouts have far fewer than 250 transactions; if your store does, page via `transactions_after`.",
+      "Per-page size for balance_transactions (Shopify caps at 250). Page size only — use `max_transactions` to control the total.",
+    ),
+  max_transactions: z
+    .number()
+    .int()
+    .min(1)
+    .max(10000)
+    .default(2500)
+    .describe(
+      "Hard cap on total balance_transactions collected across all auto-paginated pages. Default 2500 covers most real-world payouts; raise for unusually busy payouts. " +
+        "When the cap is hit before Shopify returns hasNextPage=false, `reconciliation_status` is set to `partial` and `capped: true`.",
     ),
   transactions_after: z
     .string()
     .optional()
     .describe(
-      "Cursor for forward pagination of balance_transactions (use the `endCursor` from a prior call's `balance_transactions_pageInfo`). " +
-        "Required when a previous response had `balance_transactions_pageInfo.hasNextPage: true`.",
+      "Cursor for forward pagination of balance_transactions (use the `end_cursor` from a prior call). " +
+        "When provided, treated as the starting point — `auto_paginate=true` will continue from here.",
+    ),
+  include_order_names: z
+    .boolean()
+    .default(true)
+    .describe(
+      "If true (default), make one or more batched GraphQL `nodes(ids: [...])` calls to fill in `source_order.name` (e.g. \"#29876\") for each transaction. " +
+        "Adds 1-N extra roundtrips (one per 250 distinct orders). Set false to skip for raw-id-only output.",
     ),
 });
 
@@ -47,10 +69,82 @@ type GetShopifyPayoutInput = z.infer<typeof GetShopifyPayoutInputSchema>;
 
 let shopifyClient: GraphQLClient;
 
+const PAYOUT_NODE_QUERY = gql`
+  #graphql
+
+  query GetShopifyPayoutNode($payoutGid: ID!) {
+    payoutNode: node(id: $payoutGid) {
+      ... on ShopifyPaymentsPayout {
+        id
+        legacyResourceId
+        issuedAt
+        status
+        net {
+          amount
+          currencyCode
+        }
+        summary {
+          chargesGross {
+            amount
+            currencyCode
+          }
+          chargesFee {
+            amount
+            currencyCode
+          }
+          refundsFee {
+            amount
+            currencyCode
+          }
+          refundsFeeGross {
+            amount
+            currencyCode
+          }
+          adjustmentsGross {
+            amount
+            currencyCode
+          }
+          adjustmentsFee {
+            amount
+            currencyCode
+          }
+          reservedFundsGross {
+            amount
+            currencyCode
+          }
+          reservedFundsFee {
+            amount
+            currencyCode
+          }
+          retriedPayoutsGross {
+            amount
+            currencyCode
+          }
+          retriedPayoutsFee {
+            amount
+            currencyCode
+          }
+          advanceGross {
+            amount
+            currencyCode
+          }
+          advanceFees {
+            amount
+            currencyCode
+          }
+        }
+      }
+    }
+  }
+`;
+
 const getShopifyPayout = {
   name: "shopify-get-payout",
   description:
-    "Get full details for one Shopify Payments payout, including the per-order balance-transaction breakdown that the Shopify admin UI shows. Returns reconciled totals (charges, refunds, fees, adjustments) so the caller can match against bank deposits. Requires the `read_shopify_payments_payouts` Custom App scope.",
+    "Get full details for one Shopify Payments payout, including the per-order balance-transaction breakdown that the Shopify admin UI shows. " +
+    "Auto-paginates balance_transactions by default (Shopify caps each page at 250; busy weekly payouts often exceed that once internal reserve movements are counted). " +
+    "Returns reconciled totals (charges, refunds, adjustments, transfers, disputes, fee_refunds, other) plus plain-English `reconciliation_notes` explaining the result. " +
+    "Requires the `read_shopify_payments_payouts` and `read_shopify_payments_accounts` Custom App scopes.",
   schema: GetShopifyPayoutInputSchema,
 
   initialize(client: GraphQLClient) {
@@ -62,150 +156,24 @@ const getShopifyPayout = {
       const shopDomain = process.env.MYSHOPIFY_DOMAIN ?? "";
       const { gid, legacyId } = parsePayoutId(input.payout_id);
 
-      const txnQuery = `payout_id:${legacyId}`;
-      const includeBalances = input.include_balance_transactions;
-
-      const query = gql`
-        #graphql
-
-        query GetShopifyPayout(
-          $payoutGid: ID!
-          $txnQuery: String!
-          $first: Int!
-          $includeBalances: Boolean!
-          $after: String
-        ) {
-          payoutNode: node(id: $payoutGid) {
-            ... on ShopifyPaymentsPayout {
-              id
-              legacyResourceId
-              issuedAt
-              status
-              net {
-                amount
-                currencyCode
-              }
-              summary {
-                chargesGross {
-                  amount
-                  currencyCode
-                }
-                chargesFee {
-                  amount
-                  currencyCode
-                }
-                refundsFee {
-                  amount
-                  currencyCode
-                }
-                refundsFeeGross {
-                  amount
-                  currencyCode
-                }
-                adjustmentsGross {
-                  amount
-                  currencyCode
-                }
-                adjustmentsFee {
-                  amount
-                  currencyCode
-                }
-                reservedFundsGross {
-                  amount
-                  currencyCode
-                }
-                reservedFundsFee {
-                  amount
-                  currencyCode
-                }
-                retriedPayoutsGross {
-                  amount
-                  currencyCode
-                }
-                retriedPayoutsFee {
-                  amount
-                  currencyCode
-                }
-                advanceGross {
-                  amount
-                  currencyCode
-                }
-                advanceFees {
-                  amount
-                  currencyCode
-                }
-              }
-            }
-          }
-          shopifyPaymentsAccount @include(if: $includeBalances) {
-            balanceTransactions(first: $first, query: $txnQuery, after: $after) {
-              edges {
-                node {
-                  id
-                  type
-                  amount {
-                    amount
-                    currencyCode
-                  }
-                  fee {
-                    amount
-                    currencyCode
-                  }
-                  net {
-                    amount
-                    currencyCode
-                  }
-                  transactionDate
-                  sourceId
-                  sourceType
-                  sourceOrderTransactionId
-                  associatedOrder {
-                    id
-                    name
-                  }
-                  adjustmentReason
-                }
-              }
-              pageInfo {
-                hasNextPage
-                hasPreviousPage
-                startCursor
-                endCursor
-              }
-            }
-          }
-        }
-      `;
-
-      const variables = {
-        payoutGid: gid,
-        txnQuery,
-        first: input.transactions_limit,
-        includeBalances,
-        ...(input.transactions_after ? { after: input.transactions_after } : {}),
-      };
-
-      let data: {
-        payoutNode: RawPayoutNode | null;
-        shopifyPaymentsAccount?: {
-          balanceTransactions: ShopifyConnection<RawBalanceTxnNode>;
-        } | null;
-      };
+      let payoutData: { payoutNode: RawPayoutNode | null };
       try {
-        data = (await shopifyClient.request(query, variables)) as typeof data;
+        payoutData = (await shopifyClient.request(PAYOUT_NODE_QUERY, {
+          payoutGid: gid,
+        })) as typeof payoutData;
       } catch (err) {
         throw explainPayoutAccessError(err);
       }
 
-      if (!data.payoutNode) {
+      if (!payoutData.payoutNode) {
         throw new Error(
           `Payout not found: ${gid}. Confirm the numeric id matches a payout on this store.`,
         );
       }
 
-      const payout = formatPayoutNode(data.payoutNode, shopDomain);
+      const payout = formatPayoutNode(payoutData.payoutNode, shopDomain);
 
-      if (!includeBalances) {
+      if (!input.include_balance_transactions) {
         return {
           shop: { domain: shopDomain },
           payout,
@@ -214,16 +182,43 @@ const getShopifyPayout = {
         };
       }
 
-      const conn = data.shopifyPaymentsAccount?.balanceTransactions;
-      const balance_transactions =
-        conn?.edges.map((edge) => formatBalanceTxnNode(edge.node)) ?? [];
-      const totals = computeBreakdownTotals(balance_transactions, payout.net);
+      let loaderResult;
+      try {
+        loaderResult = await fetchBalanceTransactions(shopifyClient, {
+          legacyPayoutId: legacyId,
+          pageSize: input.transactions_limit,
+          maxTransactions: input.max_transactions,
+          startCursor: input.transactions_after,
+          autoPaginate: input.auto_paginate,
+          includeOrderNames: input.include_order_names,
+        });
+      } catch (err) {
+        throw explainPayoutAccessError(err);
+      }
+
+      const totals = computeBreakdownTotals(loaderResult.transactions, payout.net, {
+        truncated: loaderResult.truncated,
+        capped: loaderResult.capped,
+        fetched: loaderResult.transactions.length,
+        max_transactions: loaderResult.capped ? input.max_transactions : undefined,
+      });
 
       return {
         shop: { domain: shopDomain },
         payout,
-        balance_transactions,
-        balance_transactions_pageInfo: conn?.pageInfo ?? null,
+        balance_transactions: loaderResult.transactions,
+        balance_transactions_pageInfo: {
+          hasNextPage: loaderResult.has_next_page,
+          endCursor: loaderResult.end_cursor,
+        },
+        pagination: {
+          auto_paginated: input.auto_paginate,
+          pages_fetched: loaderResult.fetched_pages,
+          transactions_fetched: loaderResult.transactions.length,
+          truncated: loaderResult.truncated,
+          capped: loaderResult.capped,
+          max_transactions: input.max_transactions,
+        },
         totals,
       };
     } catch (error) {
