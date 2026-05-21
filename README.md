@@ -19,6 +19,7 @@ MCP Server for Shopify API, enabling interaction with store data through GraphQL
 - **Metafield Management**: Get, set, and delete metafields on any resource (3 tools)
 - **Inventory Management**: Set absolute inventory quantities at locations (1 tool)
 - **Tag Management**: Add/remove tags on any taggable resource (1 tool)
+- **Payout Reconciliation**: List payouts, get per-order breakdown, sweep+reconcile bank deposits (3 tools)
 - **Pagination & Sorting**: Cursor-based pagination and sort keys on all list queries
 - **Advanced Filtering**: Pass-through Shopify query syntax for all list endpoints
 - **GraphQL Integration**: Direct integration with Shopify's GraphQL Admin API (2026-01)
@@ -164,7 +165,7 @@ shopify-mcp --clientId=<ID> --clientSecret=<SECRET> --domain=<YOUR_SHOP>.myshopi
 
 **⚠️ Important:** If you see errors about "SHOPIFY_ACCESS_TOKEN environment variable is required" when using command-line arguments, you might have a different package installed. Make sure you're using `shopify-mcp`, not `shopify-mcp-server`.
 
-## Available Tools (31)
+## Available Tools (34)
 
 ### Pagination, Sorting & Filtering
 
@@ -499,6 +500,43 @@ All list query tools (`get-products`, `get-customers`, `get-orders`, `get-custom
      - `id` (string, required): GID of the resource
      - `tags` (array of strings, required): Tags to add or remove
      - `action` (string, required): `"add"` or `"remove"`
+
+### Payout Reconciliation (3 tools)
+
+These tools query Shopify Payments payouts so you can match bank deposits against the underlying orders. They require the **`read_shopify_payments_payouts`** Custom App scope — grant it in **Shopify admin → Settings → Apps and sales channels → Develop apps → (your app) → Configure Admin API scopes**, then restart the MCP server so the token exchange picks up the new scope. Without the scope, all three tools return an actionable error explaining how to fix it.
+
+1. **`shopify-list-payouts`**
+
+   - List Shopify Payments payouts for this store in a date window
+   - Inputs:
+     - `since` (string, required): Inclusive lower bound on payout `issued_at`, `YYYY-MM-DD`
+     - `until` (string, required): Inclusive upper bound on payout `issued_at`, `YYYY-MM-DD`
+     - `status` (string, optional): `"paid"`, `"scheduled"`, `"pending"`, `"in_transit"`, `"canceled"`, or `"failed"`. Most reconciliation work uses `"paid"`.
+     - `limit` (number, default: 50, max: 250): Max payouts per page
+     - `after` (string, optional): Cursor for forward pagination (from `pageInfo.endCursor`)
+   - Returns each payout's `id`, `legacy_resource_id`, `issued_at`, `status`, `net`, full `summary` (charges/refunds/fees/adjustments), `currency`, and `admin_url`.
+
+2. **`shopify-get-payout`**
+
+   - Get full per-order breakdown for one payout — the same data the Shopify admin UI shows
+   - Inputs:
+     - `payout_id` (string or number, required): Numeric legacy id (e.g. `137809822064`), GID, or string of either. Smart-lookup like `get-order-by-id`.
+     - `include_balance_transactions` (boolean, default: true): Fetch the per-order breakdown
+     - `transactions_limit` (number, default: 250, max: 250): Max balance transactions per page
+     - `transactions_after` (string, optional): Cursor for paging beyond `transactions_limit` — use the `endCursor` from a prior call's `balance_transactions_pageInfo` when `hasNextPage: true`
+   - Returns the payout summary plus `balance_transactions` (each with id, type, amount, fee, net, currency, transaction_date, associated_order, source ids), `balance_transactions_pageInfo` (cursor), and a `totals` object that reconciles against the payout's reported net (`reconciles: true|false`, `delta`).
+
+3. **`shopify-payout-auto-reconcile`**
+
+   - Sweep payouts in a date window and return each with its full per-order breakdown attached. Drives bank reconciliation: the caller (LLM or another MCP) matches each payout against bank records or downstream ERP entries.
+   - Inputs:
+     - `since` (string, required): Inclusive lower bound on payout `issued_at`, `YYYY-MM-DD`
+     - `until` (string, optional, default: today): Inclusive upper bound
+     - `status` (string, default: `"paid"`): Payout status filter — defaults to `paid` since that's the only status that should be booked downstream
+     - `include_breakdowns` (boolean, default: true): If true, fetches each payout's full balance transactions inline
+     - `limit` (number, default: 50, max: 250): Max payouts to return
+     - `transactions_limit` (number, default: 250): Per-payout balance-txn cap
+   - Returns `{ window, payouts: [{ payout, breakdown }], truncated: { payouts, any_breakdown }, totals: { paid_count, paid_net_by_currency, non_paid_count, currencies } }`. Single-page fetch only — when `truncated.payouts` or `truncated.any_breakdown` is true, narrow the date range or page via `shopify-list-payouts` + `shopify-get-payout` directly. `paid_net_by_currency` is a `{ "USD": 1681.43 }` map so multi-currency stores never get a meaningless cross-currency sum. This tool is read-only on the Shopify side — it never writes to any downstream system.
 
 ### Order Query Filter Reference
 

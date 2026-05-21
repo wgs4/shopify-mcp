@@ -63,6 +63,11 @@ import { getProductVariantsDetailed } from "./getProductVariantsDetailed.js";
 // Analytics tools
 import { shopifyqlQuery } from "./shopifyqlQuery.js";
 
+// Shopify Payments payout reconciliation tools
+import { listShopifyPayouts } from "./listShopifyPayouts.js";
+import { getShopifyPayout } from "./getShopifyPayout.js";
+import { shopifyPayoutAutoReconcile } from "./shopifyPayoutAutoReconcile.js";
+
 export const tools: ShopifyTool[] = [
   // Products (8)
   getProducts,
@@ -118,4 +123,8 @@ export const tools: ShopifyTool[] = [
   getProductVariantsDetailed,
   // Analytics (1)
   shopifyqlQuery,
+  // Shopify Payments payout reconciliation (3)
+  listShopifyPayouts,
+  getShopifyPayout,
+  shopifyPayoutAutoReconcile,
 ];
