@@ -6,12 +6,12 @@ import {
   buildPayoutListQuery,
   computeBreakdownTotals,
   explainPayoutAccessError,
-  formatBalanceTxnNode,
   formatPayoutNode,
+  type NormalizedBalanceTxn,
   type NormalizedPayout,
-  type RawBalanceTxnNode,
   type RawPayoutNode,
 } from "../lib/payoutHelpers.js";
+import { fetchBalanceTransactions } from "../lib/balanceTransactionsLoader.js";
 
 const PAYOUT_STATUSES = [
   "paid",
@@ -54,6 +54,13 @@ const ShopifyPayoutAutoReconcileInputSchema = z.object({
     .max(250)
     .default(50)
     .describe("Max payouts to return (Shopify connection page cap is 250)"),
+  auto_paginate_transactions: z
+    .boolean()
+    .default(true)
+    .describe(
+      "If true (default), each payout's breakdown walks all balance_transactions pages until exhausted or `max_transactions_per_payout` is hit. " +
+        "Set false to fetch a single page per payout (PR #2 behavior).",
+    ),
   transactions_limit: z
     .number()
     .int()
@@ -61,7 +68,34 @@ const ShopifyPayoutAutoReconcileInputSchema = z.object({
     .max(250)
     .default(250)
     .describe(
-      "Max balance transactions per payout when include_breakdowns=true (Shopify caps at 250)",
+      "Per-page size for each payout's balance_transactions (Shopify caps at 250). Page size only.",
+    ),
+  max_transactions_per_payout: z
+    .number()
+    .int()
+    .min(1)
+    .max(10000)
+    .default(2500)
+    .describe(
+      "Hard cap on total balance_transactions collected per payout. When a payout hits the cap, its `reconciliation_status` is set to `partial`.",
+    ),
+  include_order_names: z
+    .boolean()
+    .default(true)
+    .describe(
+      "If true (default), enrich each transaction's `source_order.name` (e.g. \"#29876\") via batched GraphQL `nodes(ids: [...])` calls. " +
+        "Set false to skip — useful for cheap status-only sweeps where display names aren't needed.",
+    ),
+  max_transactions_total: z
+    .number()
+    .int()
+    .min(1)
+    .max(100000)
+    .default(25000)
+    .describe(
+      "Global cap on the SUM of balance_transactions across all payouts in this sweep response. " +
+        "Once exceeded, subsequent payouts are returned without breakdowns and `truncated.global_cap_hit` is set. " +
+        "Protects against worst-case `limit * max_transactions_per_payout` cross-product blowups.",
     ),
 });
 
@@ -152,54 +186,13 @@ const PAYOUTS_QUERY = gql`
   }
 `;
 
-const BALANCE_TXN_QUERY = gql`
-  #graphql
-
-  query SweepPayoutBalanceTxns($first: Int!, $query: String!) {
-    shopifyPaymentsAccount {
-      balanceTransactions(first: $first, query: $query) {
-        edges {
-          node {
-            id
-            type
-            amount {
-              amount
-              currencyCode
-            }
-            fee {
-              amount
-              currencyCode
-            }
-            net {
-              amount
-              currencyCode
-            }
-            transactionDate
-            sourceId
-            sourceType
-            sourceOrderTransactionId
-            associatedOrder {
-              id
-              name
-            }
-            adjustmentReason
-          }
-        }
-        pageInfo {
-          hasNextPage
-          endCursor
-        }
-      }
-    }
-  }
-`;
-
 const shopifyPayoutAutoReconcile = {
   name: "shopify-payout-auto-reconcile",
   description:
     "Sweep Shopify Payments payouts in a date window and return each one with its full per-order breakdown attached. Designed to drive bank reconciliation: the caller (LLM or another MCP) takes each payout's net + admin_url + breakdown and matches them against bank-side records or xTuple cashrcpts. This tool itself never writes to xTuple — it is read-only on the Shopify side. " +
-    "Single-page fetch only: a single response covers at most `limit` payouts (max 250) and `transactions_limit` balance transactions per payout (max 250). The response includes a `truncated` block flagging when more pages exist; for larger windows, narrow the date range or call `shopify-list-payouts` + `shopify-get-payout` in a paged loop. " +
-    "Requires the `read_shopify_payments_payouts` Custom App scope.",
+    "Per-payout breakdowns auto-paginate balance_transactions by default (Shopify caps each page at 250). Each payout entry includes its own `reconciliation_notes` and `reconciliation_status` (reconciled | unreconciled | partial). " +
+    "Single-page payout list: a single response covers at most `limit` payouts (max 250). The response includes a `truncated.payouts` flag when more payouts exist; for larger windows, narrow the date range or call `shopify-list-payouts` + `shopify-get-payout` in a paged loop. " +
+    "Requires the `read_shopify_payments_payouts` and `read_shopify_payments_accounts` Custom App scopes.",
   schema: ShopifyPayoutAutoReconcileInputSchema,
 
   initialize(client: GraphQLClient) {
@@ -252,21 +245,34 @@ const shopifyPayoutAutoReconcile = {
         formatPayoutNode(edge.node, shopDomain),
       );
 
-      type PayoutEntry = {
-        payout: NormalizedPayout;
-        breakdown:
-          | {
-              balance_transactions: ReturnType<typeof formatBalanceTxnNode>[];
-              totals: ReturnType<typeof computeBreakdownTotals>;
-              truncated: boolean;
-            }
-          | null;
+      type Breakdown = {
+        balance_transactions: NormalizedBalanceTxn[];
+        totals: ReturnType<typeof computeBreakdownTotals>;
+        // Back-compat aliases at the breakdown level (matches PR #2 shape).
+        truncated: boolean;
+        capped: boolean;
+        pagination: {
+          auto_paginated: boolean;
+          pages_fetched: number;
+          transactions_fetched: number;
+          truncated: boolean;
+          capped: boolean;
+          max_transactions: number;
+          end_cursor: string | null;
+          has_next_page: boolean;
+        };
       };
+      const entries: Array<{
+        payout: NormalizedPayout;
+        breakdown: Breakdown | null;
+      }> = [];
 
-      const entries: PayoutEntry[] = [];
       let paidCount = 0;
       let nonPaidCount = 0;
       let anyBreakdownTruncated = false;
+      let anyBreakdownCapped = false;
+      let globalCapHit = false;
+      let totalTransactionsFetched = 0;
       const paidNetByCurrency: Record<string, number> = {};
       const currencies = new Set<string>();
 
@@ -280,38 +286,69 @@ const shopifyPayoutAutoReconcile = {
           nonPaidCount += 1;
         }
 
-        let breakdown: PayoutEntry["breakdown"] = null;
+        let breakdown: Breakdown | null = null;
 
         if (input.include_breakdowns) {
-          let txnData: {
-            shopifyPaymentsAccount: {
-              balanceTransactions: ShopifyConnection<RawBalanceTxnNode>;
-            } | null;
-          };
-          try {
-            txnData = (await shopifyClient.request(BALANCE_TXN_QUERY, {
-              first: input.transactions_limit,
-              query: `payout_id:${payout.legacy_resource_id}`,
-            })) as typeof txnData;
-          } catch (err) {
-            throw explainPayoutAccessError(err);
-          }
+          if (totalTransactionsFetched >= input.max_transactions_total) {
+            globalCapHit = true;
+            // Skip breakdown entirely — payout entry still listed for status.
+          } else {
+            const remainingGlobal =
+              input.max_transactions_total - totalTransactionsFetched;
+            const effectivePerPayoutCap = Math.min(
+              input.max_transactions_per_payout,
+              remainingGlobal,
+            );
 
-          const txns =
-            txnData.shopifyPaymentsAccount?.balanceTransactions.edges.map(
-              (edge) => formatBalanceTxnNode(edge.node),
-            ) ?? [];
-          const totals = computeBreakdownTotals(txns, payout.net);
-          const truncated = Boolean(
-            txnData.shopifyPaymentsAccount?.balanceTransactions.pageInfo
-              ?.hasNextPage,
-          );
-          if (truncated) anyBreakdownTruncated = true;
-          breakdown = {
-            balance_transactions: txns,
-            totals,
-            truncated,
-          };
+            let loaderResult;
+            try {
+              loaderResult = await fetchBalanceTransactions(shopifyClient, {
+                legacyPayoutId: payout.legacy_resource_id,
+                pageSize: input.transactions_limit,
+                maxTransactions: effectivePerPayoutCap,
+                autoPaginate: input.auto_paginate_transactions,
+                includeOrderNames: input.include_order_names,
+              });
+            } catch (err) {
+              throw explainPayoutAccessError(err);
+            }
+
+            totalTransactionsFetched += loaderResult.transactions.length;
+            if (loaderResult.truncated) anyBreakdownTruncated = true;
+            if (loaderResult.capped) anyBreakdownCapped = true;
+
+            const totals = computeBreakdownTotals(
+              loaderResult.transactions,
+              payout.net,
+              {
+                truncated: loaderResult.truncated,
+                capped: loaderResult.capped,
+                fetched: loaderResult.transactions.length,
+                max_transactions: loaderResult.capped
+                  ? effectivePerPayoutCap
+                  : undefined,
+              },
+            );
+
+            breakdown = {
+              balance_transactions: loaderResult.transactions,
+              totals,
+              // Back-compat aliases at the breakdown level for callers typed
+              // against PR #2's response shape.
+              truncated: loaderResult.truncated,
+              capped: loaderResult.capped,
+              pagination: {
+                auto_paginated: input.auto_paginate_transactions,
+                pages_fetched: loaderResult.fetched_pages,
+                transactions_fetched: loaderResult.transactions.length,
+                truncated: loaderResult.truncated,
+                capped: loaderResult.capped,
+                max_transactions: effectivePerPayoutCap,
+                end_cursor: loaderResult.end_cursor,
+                has_next_page: loaderResult.has_next_page,
+              },
+            };
+          }
         }
 
         entries.push({ payout, breakdown });
@@ -333,6 +370,8 @@ const shopifyPayoutAutoReconcile = {
         truncated: {
           payouts: payoutsTruncated,
           any_breakdown: anyBreakdownTruncated,
+          any_breakdown_capped: anyBreakdownCapped,
+          global_cap_hit: globalCapHit,
         },
         totals: {
           paid_count: paidCount,
