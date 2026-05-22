@@ -278,7 +278,11 @@ const shopifyPayoutAutoReconcile = {
 
       for (const payout of normalizedPayouts) {
         currencies.add(payout.currency);
-        if (payout.status === "paid") {
+        // Shopify's ShopifyPaymentsPayoutStatus enum returns uppercase values
+        // ("PAID", "SCHEDULED", "IN_TRANSIT", ...). formatPayoutNode passes the
+        // raw value through, so normalize before comparing against the
+        // input.status spec (lowercase).
+        if (payout.status.toLowerCase() === "paid") {
           paidCount += 1;
           paidNetByCurrency[payout.currency] =
             (paidNetByCurrency[payout.currency] ?? 0) + payout.net;
