@@ -6,6 +6,10 @@ import dotenv from "dotenv";
 import { GraphQLClient } from "graphql-request";
 import minimist from "minimist";
 
+import {
+  attachActivityToTransport,
+  startLifecycleWatchdog,
+} from "./lib/lifecycleWatchdog.js";
 import { ShopifyAuth } from "./lib/shopifyAuth.js";
 import { tools } from "./tools/registry.js";
 
@@ -109,8 +113,14 @@ for (const tool of tools) {
   );
 }
 
+// Arm the lifecycle watchdog before connecting the transport so the idle
+// clock starts at server-ready and so the message-level activity hook is in
+// place before Protocol.connect() captures it.
+startLifecycleWatchdog();
+
 // Start the server
 const transport = new StdioServerTransport();
+attachActivityToTransport(transport);
 server
   .connect(transport)
   .then(() => {})
