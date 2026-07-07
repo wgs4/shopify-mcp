@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { xtupleBridge } from "./xtupleBridge.js";
 
 // ── Shared Zod schemas ────────────────────────────────────────────────
 
@@ -115,5 +116,7 @@ export function formatOrderSummary(order: RawOrderNode) {
     lineItems: formatLineItems(order.lineItems),
     tags: order.tags,
     note: order.note,
+    // Bridge to the WGS xTuple sales order this Shopify order imports as.
+    xtuple: xtupleBridge(order.name),
   };
 }

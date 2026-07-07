@@ -2,6 +2,7 @@ import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
 import { handleToolError } from "../lib/toolUtils.js";
+import { xtupleBridge } from "../lib/xtupleBridge.js";
 
 // Input schema for getDraftOrder
 const GetDraftOrderInputSchema = z.object({
@@ -67,12 +68,16 @@ const getDraftOrder = {
           return res.draftOrders.edges;
         };
 
+        // Draft-order names may carry a "#" prefix (e.g. "#D359"); match
+        // by comparing both sides with the "#" stripped and upper-cased.
+        const norm = (s: string) => s.replace(/^#/, "").toUpperCase();
+
         // Prefer a name-scoped search, fall back to plain full-text.
         let edges = await runSearch(`name:${name}`);
-        let exact = edges.find((e) => e.node.name === name);
+        let exact = edges.find((e) => norm(e.node.name) === name);
         if (!exact) {
           edges = await runSearch(name);
-          exact = edges.find((e) => e.node.name === name);
+          exact = edges.find((e) => norm(e.node.name) === name);
         }
 
         if (!exact) {
@@ -227,6 +232,8 @@ const getDraftOrder = {
             }
           : null,
         completedOrder: d.order ? { id: d.order.id, name: d.order.name } : null,
+        // Bridge to the WGS xTuple sales order this draft imports as.
+        xtuple: xtupleBridge(d.name),
         totalPrice: d.totalPriceSet?.shopMoney ?? null,
         subtotalPrice: d.subtotalPriceSet?.shopMoney ?? null,
         totalTax: d.totalTaxSet?.shopMoney ?? null,
