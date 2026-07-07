@@ -16,6 +16,7 @@ import { getOrderById } from "./getOrderById.js";
 import { updateOrder } from "./updateOrder.js";
 import { createDraftOrder } from "./createDraftOrder.js";
 import { completeDraftOrder } from "./completeDraftOrder.js";
+import { getDraftOrder } from "./getDraftOrder.js";
 import { orderCancel } from "./orderCancel.js";
 import { orderCloseOpen } from "./orderCloseOpen.js";
 import { orderMarkAsPaid } from "./orderMarkAsPaid.js";
@@ -78,12 +79,13 @@ export const tools: ShopifyTool[] = [
   manageProductVariants,
   deleteProductVariants,
   manageProductOptions,
-  // Orders (10)
+  // Orders (11)
   getOrders,
   getOrderById,
   updateOrder,
   createDraftOrder,
   completeDraftOrder,
+  getDraftOrder,
   orderCancel,
   orderCloseOpen,
   orderMarkAsPaid,
