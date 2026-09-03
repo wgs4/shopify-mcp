@@ -190,12 +190,11 @@ describe("hasScope / hasAnyScope", () => {
     expect(hasAnyScope([], ["read_orders"])).toBe(false);
   });
 
-  test("FULFILLMENT_ORDER_SCOPES lists the four fulfillment-order reads", () => {
+  test("FULFILLMENT_ORDER_SCOPES lists the three fulfillment-order reads", () => {
     expect([...FULFILLMENT_ORDER_SCOPES]).toEqual([
       "read_merchant_managed_fulfillment_orders",
       "read_assigned_fulfillment_orders",
       "read_third_party_fulfillment_orders",
-      "read_marketplace_fulfillment_orders",
     ]);
   });
 });
@@ -210,13 +209,13 @@ describe("missingScopeError", () => {
     );
   });
 
-  test("joins an array of scopes", () => {
+  test("joins an array of scopes with plural fulfillment-order wording", () => {
     const err = missingScopeError("fulfillmentOrders", [
       "read_merchant_managed_fulfillment_orders",
       "read_assigned_fulfillment_orders",
     ]);
-    expect(err.message).toContain(
-      "this app's token lacks read_merchant_managed_fulfillment_orders, read_assigned_fulfillment_orders",
+    expect(err.message).toBe(
+      "Access denied for fulfillmentOrders: this app's token lacks the fulfillment-order scopes (read_merchant_managed_fulfillment_orders, read_assigned_fulfillment_orders). Add them to app shop-wgs-mcp-8-6-26 and re-authorize the store.",
     );
   });
 });

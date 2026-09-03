@@ -40,7 +40,6 @@ export const FULFILLMENT_ORDER_SCOPES = [
   "read_merchant_managed_fulfillment_orders",
   "read_assigned_fulfillment_orders",
   "read_third_party_fulfillment_orders",
-  "read_marketplace_fulfillment_orders",
 ] as const;
 
 const CURRENT_ACCESS_SCOPES_QUERY = `#graphql
@@ -119,10 +118,13 @@ export function missingScopeError(
   field: string,
   scopes: string | string[],
 ): Error {
-  const list = Array.isArray(scopes) ? scopes.join(", ") : scopes;
-  const err = new Error(
-    `Access denied for ${field}: this app's token lacks ${list}. Add the scope to app shop-wgs-mcp-8-6-26 and re-authorize the store.`,
-  );
+  const isList = Array.isArray(scopes);
+  const list = isList ? scopes.join(", ") : scopes;
+  const message =
+    isList && scopes.length > 1
+      ? `Access denied for ${field}: this app's token lacks the fulfillment-order scopes (${list}). Add them to app shop-wgs-mcp-8-6-26 and re-authorize the store.`
+      : `Access denied for ${field}: this app's token lacks ${list}. Add the scope to app shop-wgs-mcp-8-6-26 and re-authorize the store.`;
+  const err = new Error(message);
   err.name = "MissingScopeError";
   (err as Error & { code: string }).code = "MISSING_SCOPE";
   return err;

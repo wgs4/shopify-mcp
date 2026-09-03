@@ -41,7 +41,7 @@
  *        +-- FAILED other -------- throw FAILED
  *        +-- CANCELED / CANCELING  throw CANCELED
  *        +-- EXPIRED ------------- throw EXPIRED
- *        +-- past deadlineMs ----- throw DEADLINE (id in message, for resume)
+ *        +-- past deadlineMs ----- throw DEADLINE (keeps running, not cancelled)
  *        +-- COMPLETED
  *              |
  *              v
@@ -61,6 +61,7 @@ import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 
 import { bumpActivity } from "./lifecycleWatchdog.js";
+import { withTransientRetry } from "./toolUtils.js";
 
 // ── Public types ────────────────────────────────────────────────────────
 
@@ -192,6 +193,14 @@ const DEFAULT_BUSY_RETRY_INTERVAL_MS = 10_000;
 const DEFAULT_BUSY_DEADLINE_MS = 5 * 60 * 1_000;
 const DEFAULT_MAX_OBJECTS = 250_000;
 const DOWNLOAD_RETRY_DELAY_MS = 1_000;
+
+function urlHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "unknown-host";
+  }
+}
 
 interface ResolvedBulkRunOptions {
   pollIntervalMs: number;
@@ -443,13 +452,16 @@ async function pollUntilDone(
     if (options.now() - startedAt >= options.deadlineMs) {
       throw new BulkOperationError(
         "DEADLINE",
-        `Bulk operation ${operationId} exceeded the ${options.deadlineMs}ms deadline; caller can resume later using this operation id`,
+        `Bulk operation ${operationId} did not finish within ${options.deadlineMs / 1000} s; it keeps running on Shopify (not cancelled). Narrow the date range or retry later.`,
         operationId,
       );
     }
 
     bumpActivity();
-    const data = await client.request(BULK_OPERATION_STATUS, { id: operationId });
+    const data = await withTransientRetry(
+      () => client.request(BULK_OPERATION_STATUS, { id: operationId }),
+      { attempts: 3, delaysMs: [1000, 2000, 4000], sleep: options.sleep },
+    );
     polls += 1;
     const raw = (data as { bulkOperation?: RawStatusNode | null })?.bulkOperation;
     const node = normalizeStatusNode(raw, operationId);
@@ -534,7 +546,7 @@ async function downloadJsonl(
         secondErr instanceof Error ? secondErr.message : String(secondErr);
       throw new BulkOperationError(
         "DOWNLOAD_FAILED",
-        `Failed to download bulk operation results from ${url}: ${detail}`,
+        `Failed to download results for bulk operation ${bulkOperationId} from ${urlHost(url)}: ${detail}`,
         bulkOperationId,
       );
     }

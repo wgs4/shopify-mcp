@@ -60,6 +60,9 @@ function fakeClient(responses: unknown[]) {
     }
     const next = responses[i];
     i += 1;
+    if (next instanceof Error) {
+      throw next;
+    }
     return next;
   });
   const client = {
@@ -772,8 +775,34 @@ describe("runBulkQuery", () => {
     );
     expect(err.code).toBe("DEADLINE");
     expect(err.message).toMatch(OP_ID);
+    expect(err.message).toMatch(
+      /did not finish within 2\.5 s; it keeps running on Shopify \(not cancelled\)/,
+    );
+    expect(err.message).not.toMatch(/resume/i);
     expect(err.bulkOperationId).toBe(OP_ID);
     expectNoCancel(request);
+  });
+
+  test("poll 503 then RUNNING then COMPLETED retries the status request", async () => {
+    const clock = fakeClock();
+    const err503 = Object.assign(new Error("Service Unavailable"), {
+      response: { status: 503 },
+    });
+    const { client } = fakeClient([
+      submitOk(),
+      err503,
+      pollNode({ status: "RUNNING" }),
+      pollNode({ status: "COMPLETED", url: null }),
+    ]);
+    const result = await runBulkQuery(
+      client,
+      INNER,
+      runOpts(clock, { pollIntervalMs: 2000 }),
+    );
+    expect(result.id).toBe(OP_ID);
+    expect(result.polls).toBe(2);
+    expect(clock.delays).toContain(1000);
+    expect(clock.delays).toContain(2000);
   });
 
   test("objectCount string 300000 throws TOO_MANY_OBJECTS and suggests a narrower range", async () => {
@@ -900,9 +929,37 @@ describe("runBulkQuery", () => {
       ),
     );
     expect(err.code).toBe("DOWNLOAD_FAILED");
-    expect(err.message).toMatch(RESULT_URL);
+    expect(err.message).toMatch(/storage\.example\.test/);
+    expect(err.message).toContain(OP_ID);
+    expect(err.message).not.toContain(RESULT_URL);
     expect(err.bulkOperationId).toBe(OP_ID);
     expect(clock.delays).toEqual([1000]);
+  });
+
+  test("DOWNLOAD_FAILED message never includes a signed URL", async () => {
+    const clock = fakeClock();
+    const signed =
+      "https://storage.googleapis.com/bucket/obj?GoogleAccessId=sa@proj.iam.gserviceaccount.com&Signature=abc123XYZ&Expires=1700000000";
+    const fetchMock = jest
+      .fn()
+      .mockRejectedValueOnce(new Error("first"))
+      .mockRejectedValueOnce(new Error("second"));
+    const { client } = fakeClient([
+      submitOk(),
+      pollNode({ status: "COMPLETED", url: signed }),
+    ]);
+    const err = await expectBulkReject(
+      runBulkQuery(
+        client,
+        INNER,
+        runOpts(clock, { fetchImpl: fetchMock as unknown as typeof fetch }),
+      ),
+    );
+    expect(err.code).toBe("DOWNLOAD_FAILED");
+    expect(err.message).toContain("storage.googleapis.com");
+    expect(err.message).not.toContain("Signature=");
+    expect(err.message).not.toContain("GoogleAccessId");
+    expect(err.message).not.toContain(signed);
   });
 
   test("download network error twice throws DOWNLOAD_FAILED", async () => {

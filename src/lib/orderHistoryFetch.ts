@@ -30,8 +30,8 @@
  *   CandidateOrder[]  --lineMatches--> matching ids
  *        |
  *        v
- *   nodes(ids) in batches of 20, document picked by scopes:
- *     none | returns | fulfillmentOrders | both
+ *   nodes(ids) in per-document chunks (NONE 16, RETURNS 5, FO 7, BOTH 3);
+ *     max-cost errors halve the chunk (min 1) and retry that chunk:
  *        |
  *        +-- fulfillments/refunds length >= 50 OR any nested hasNextPage
  *        |      --> throw (refusing to undercount)
@@ -74,6 +74,7 @@ import {
   nextDay,
   shopDayStartOffsetIso,
 } from "./shopTime.js";
+import { withTransientRetry } from "./toolUtils.js";
 
 // ── Public constants ────────────────────────────────────────────────────
 
@@ -83,12 +84,17 @@ export const DETAILS_BATCH_SIZE = 20;
 export const NESTED_LIST_PAGE_LIMIT = 50;
 export const THROTTLE_MAX_SLEEP_MS = 30_000;
 export const THROTTLE_RETRY_BACKOFF_MS = [2_000, 4_000, 8_000] as const;
+export const TRANSIENT_RETRY_DELAYS_MS = [1_000, 2_000, 4_000] as const;
 
-export const FO_DETAIL_SCOPES = [
-  "read_merchant_managed_fulfillment_orders",
-  "read_assigned_fulfillment_orders",
-  "read_third_party_fulfillment_orders",
-] as const;
+/** Per selected details document: NONE 16, RETURNS 5, FO 7, BOTH 3. */
+export const DETAILS_CHUNK_SIZES = {
+  NONE: 16,
+  RETURNS: 5,
+  FO: 7,
+  BOTH: 3,
+} as const;
+
+export const FO_DETAIL_SCOPES = FULFILLMENT_ORDER_SCOPES;
 
 const ORDER_FILTER_PLACEHOLDER = "__ORDER_FILTER__";
 
@@ -242,6 +248,7 @@ export interface ThrottleGate {
   currentlyAvailable: number;
   restoreRate: number;
   requests: number;
+  maxRequestedQueryCost: number;
 }
 
 export function newThrottleGate(): ThrottleGate {
@@ -250,6 +257,7 @@ export function newThrottleGate(): ThrottleGate {
     currentlyAvailable: Number.POSITIVE_INFINITY,
     restoreRate: 50,
     requests: 0,
+    maxRequestedQueryCost: 0,
   };
 }
 
@@ -312,6 +320,9 @@ function updateThrottleGate(gate: ThrottleGate, extensions: unknown): void {
     return;
   }
   gate.lastRequestedQueryCost = read.requestedQueryCost;
+  if (read.requestedQueryCost > gate.maxRequestedQueryCost) {
+    gate.maxRequestedQueryCost = read.requestedQueryCost;
+  }
   gate.currentlyAvailable = read.currentlyAvailable;
   gate.restoreRate = read.restoreRate;
 }
@@ -370,9 +381,24 @@ async function throttledRawRequest<T>(
 
     let result: RawRequestResult<T>;
     try {
-      result = (await client.rawRequest(query, variables)) as RawRequestResult<T>;
+      result = await withTransientRetry(async () => {
+        try {
+          const once = (await client.rawRequest(
+            query,
+            variables,
+          )) as RawRequestResult<T>;
+          gate.requests += 1;
+          return once;
+        } catch (err) {
+          gate.requests += 1;
+          throw err;
+        }
+      }, {
+        attempts: 3,
+        delaysMs: [...TRANSIENT_RETRY_DELAYS_MS],
+        sleep,
+      });
     } catch (err) {
-      gate.requests += 1;
       if (isMissingScopeError(err)) {
         throw err;
       }
@@ -386,7 +412,6 @@ async function throttledRawRequest<T>(
       throw err;
     }
 
-    gate.requests += 1;
     updateThrottleGate(gate, result.extensions);
 
     if (Array.isArray(result.errors) && result.errors.length > 0) {
@@ -804,6 +829,36 @@ export function selectDetailsDocument(scopes: string[]): string {
   return ORDER_HISTORY_DETAILS_NONE;
 }
 
+export function detailsChunkSize(scopes: string[]): number {
+  const returns = hasReturnsScope(scopes);
+  const fo = hasFulfillmentOrderDetailScopes(scopes);
+  if (returns && fo) {
+    return DETAILS_CHUNK_SIZES.BOTH;
+  }
+  if (returns) {
+    return DETAILS_CHUNK_SIZES.RETURNS;
+  }
+  if (fo) {
+    return DETAILS_CHUNK_SIZES.FO;
+  }
+  return DETAILS_CHUNK_SIZES.NONE;
+}
+
+const MAX_COST_RE = /max(imum)? cost|exceeds the maximum single query cost/i;
+
+export function isMaxCostQueryError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  if (MAX_COST_RE.test(message)) {
+    return true;
+  }
+  const rec = err as { response?: { errors?: Array<{ message?: string }> } };
+  const errors = rec.response?.errors;
+  if (Array.isArray(errors)) {
+    return errors.some((entry) => MAX_COST_RE.test(entry?.message ?? ""));
+  }
+  return false;
+}
+
 // ── Candidate shapes ────────────────────────────────────────────────────
 
 export interface CandidateOrder {
@@ -828,6 +883,7 @@ export interface CandidateScanResult {
   bulkOperationId: string | null;
   requests: number;
   query: string;
+  maxRequestedQueryCost: number;
 }
 
 export interface FetchCandidatesArgs {
@@ -1012,6 +1068,7 @@ export function matchingLineParams(
     },
     asOf: "1970-01-01T00:00:00.000Z",
     fulfillmentOrderScopesComplete: false,
+    returnsScopeComplete: false,
   };
 }
 
@@ -1097,7 +1154,11 @@ async function fetchCandidatesCursor(
   client: GraphQLClient,
   filter: string,
   sleep: (ms: number) => Promise<void>,
-): Promise<{ orders: CandidateOrder[]; requests: number }> {
+): Promise<{
+  orders: CandidateOrder[];
+  requests: number;
+  maxRequestedQueryCost: number;
+}> {
   const gate = newThrottleGate();
   const orders: CandidateOrder[] = [];
   let after: string | null = null;
@@ -1156,7 +1217,11 @@ async function fetchCandidatesCursor(
     after = connection.pageInfo.endCursor;
   }
 
-  return { orders, requests: gate.requests };
+  return {
+    orders,
+    requests: gate.requests,
+    maxRequestedQueryCost: gate.maxRequestedQueryCost,
+  };
 }
 
 async function fetchCandidatesBulk(
@@ -1205,6 +1270,7 @@ export async function fetchCandidates(
       bulkOperationId: bulk.bulkOperationId,
       requests: bulk.requests,
       query: filter,
+      maxRequestedQueryCost: 0,
     };
   }
   const cursor = await fetchCandidatesCursor(client, filter, resolved.sleep);
@@ -1214,6 +1280,7 @@ export async function fetchCandidates(
     bulkOperationId: null,
     requests: cursor.requests,
     query: filter,
+    maxRequestedQueryCost: cursor.maxRequestedQueryCost,
   };
 }
 
@@ -1416,6 +1483,7 @@ export function mapDetailNodeToRawOrder(
 export interface OrderDetailsResult {
   orders: RawOrder[];
   requests: number;
+  maxRequestedQueryCost: number;
 }
 
 export async function fetchOrderDetails(
@@ -1425,7 +1493,7 @@ export async function fetchOrderDetails(
   deps?: OrderHistoryFetchDeps,
 ): Promise<OrderDetailsResult> {
   if (orders.length === 0) {
-    return { orders: [], requests: 0 };
+    return { orders: [], requests: 0, maxRequestedQueryCost: 0 };
   }
   const resolved = resolveDeps(deps);
   const document = selectDetailsDocument(scopes);
@@ -1435,21 +1503,37 @@ export async function fetchOrderDetails(
   const byId = new Map<string, DetailOrderNode>();
   const ids = orders.map((order) => order.id);
 
-  for (const chunk of chunkIds(ids, DETAILS_BATCH_SIZE)) {
-    const data = await throttledRawRequest<DetailsQueryData>(
-      client,
-      document,
-      { ids: chunk },
-      gate,
-      resolved.sleep,
-    );
-    const nodes = data.nodes ?? [];
-    for (const node of nodes) {
-      if (node && node.id != null) {
-        byId.set(String(node.id), node);
+  const fetchChunks = async (
+    batchIds: string[],
+    size: number,
+  ): Promise<void> => {
+    for (const chunk of chunkIds(batchIds, size)) {
+      try {
+        const data = await throttledRawRequest<DetailsQueryData>(
+          client,
+          document,
+          { ids: chunk },
+          gate,
+          resolved.sleep,
+        );
+        const nodes = data.nodes ?? [];
+        for (const node of nodes) {
+          if (node && node.id != null) {
+            byId.set(String(node.id), node);
+          }
+        }
+      } catch (err) {
+        if (isMaxCostQueryError(err) && chunk.length > 1) {
+          const nextSize = Math.max(1, Math.floor(chunk.length / 2));
+          await fetchChunks(chunk, nextSize);
+          continue;
+        }
+        throw err;
       }
     }
-  }
+  };
+
+  await fetchChunks(ids, detailsChunkSize(scopes));
 
   const rawOrders: RawOrder[] = [];
   for (const candidate of orders) {
@@ -1468,5 +1552,9 @@ export async function fetchOrderDetails(
     );
   }
 
-  return { orders: rawOrders, requests: gate.requests };
+  return {
+    orders: rawOrders,
+    requests: gate.requests,
+    maxRequestedQueryCost: gate.maxRequestedQueryCost,
+  };
 }

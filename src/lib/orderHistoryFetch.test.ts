@@ -8,7 +8,9 @@ import type { GraphQLClient } from "graphql-request";
 import { SCOPE_CACHE_TTL_MS, _resetForTest as resetScopes } from "./accessScopes.js";
 import {
   DETAILS_BATCH_SIZE,
+  DETAILS_CHUNK_SIZES,
   FO_DETAIL_SCOPES,
+  detailsChunkSize,
   ORDER_HISTORY_CANDIDATES_QUERY,
   ORDER_HISTORY_DETAILS_BOTH,
   ORDER_HISTORY_DETAILS_FO,
@@ -612,7 +614,7 @@ describe("fetchOrderDetails", () => {
     };
   }
 
-  test("batches 45 ids into 20/20/5 and maps numbers / nulls", async () => {
+  test("batches 45 ids into 16/16/13 (NONE document) and maps numbers / nulls", async () => {
     const { client, rawRequest } = fakeClient();
     const orders = Array.from({ length: 45 }, (_, i) =>
       stubCandidate(`gid://shopify/Order/${i + 1}`, `#${i + 1}`),
@@ -654,7 +656,7 @@ describe("fetchOrderDetails", () => {
       ["read_orders"],
       { sleep: async () => {} },
     );
-    expect(seen).toEqual([20, 20, 5]);
+    expect(seen).toEqual([16, 16, 13]);
     expect(result.orders).toHaveLength(45);
     expect(result.orders[0].refunds[0].createdAt).toBeNull();
     expect(result.orders[0].refunds[0].totalRefundedAmount).toBeNull();
@@ -893,7 +895,7 @@ describe("fetchOrderDetails", () => {
       ),
     ).rejects.toThrow(/missing from details response/);
     const empty = await fetchOrderDetails(client, [], ["read_orders"]);
-    expect(empty).toEqual({ orders: [], requests: 0 });
+    expect(empty).toEqual({ orders: [], requests: 0, maxRequestedQueryCost: 0 });
     expect(rawRequest).toHaveBeenCalledTimes(1);
   });
 });
@@ -970,5 +972,196 @@ describe("mapDetailNodeToRawOrder", () => {
     expect(raw.returns).toBeNull();
     expect(raw.fulfillmentOrders).toBeNull();
     expect(raw.sourceName).toBeNull();
+  });
+});
+
+describe("details chunk sizes per document", () => {
+  test("NONE 16, RETURNS 5, FO 7, BOTH 3", () => {
+    expect(DETAILS_CHUNK_SIZES).toEqual({
+      NONE: 16,
+      RETURNS: 5,
+      FO: 7,
+      BOTH: 3,
+    });
+    expect(detailsChunkSize(["read_orders"])).toBe(16);
+    expect(detailsChunkSize(["read_returns"])).toBe(5);
+    expect(detailsChunkSize([...FO_DETAIL_SCOPES])).toBe(7);
+    expect(detailsChunkSize(["read_returns", ...FO_DETAIL_SCOPES])).toBe(3);
+  });
+
+  test("chunking by document splits ids at the mapped size", async () => {
+    async function seenFor(scopes: string[], n: number): Promise<number[]> {
+      const { client, rawRequest } = fakeClient();
+      const orders = Array.from({ length: n }, (_, i) => ({
+        id: `gid://shopify/Order/${i + 1}`,
+        name: `#${i + 1}`,
+        createdAt: "2026-07-27T03:40:26Z",
+        cancelledAt: null,
+        sourceName: "web",
+        test: false,
+        tags: [],
+        lineItems: [],
+        fulfillments: [],
+        refunds: [],
+      }));
+      const seen: number[] = [];
+      rawRequest.mockImplementation(async (_q: unknown, vars: unknown) => {
+        const ids = (vars as { ids: string[] }).ids;
+        seen.push(ids.length);
+        return rawOk({
+          nodes: ids.map((id) => ({
+            id,
+            fulfillments: [],
+            refunds: [],
+          })),
+        });
+      });
+      await fetchOrderDetails(client, orders, scopes, { sleep: async () => {} });
+      return seen;
+    }
+    expect(await seenFor(["read_orders"], 20)).toEqual([16, 4]);
+    expect(await seenFor(["read_returns"], 12)).toEqual([5, 5, 2]);
+    expect(await seenFor([...FO_DETAIL_SCOPES], 10)).toEqual([7, 3]);
+    expect(await seenFor(["read_returns", ...FO_DETAIL_SCOPES], 7)).toEqual([
+      3, 3, 1,
+    ]);
+  });
+
+  test("max-cost error halves the chunk and retries", async () => {
+    const { client, rawRequest } = fakeClient();
+    const orders = Array.from({ length: 4 }, (_, i) => ({
+      id: `gid://shopify/Order/${i + 1}`,
+      name: `#${i + 1}`,
+      createdAt: "2026-07-27T03:40:26Z",
+      cancelledAt: null,
+      sourceName: "web",
+      test: false,
+      tags: [],
+      lineItems: [],
+      fulfillments: [],
+      refunds: [],
+    }));
+    const seen: number[] = [];
+    rawRequest.mockImplementation(async (_q: unknown, vars: unknown) => {
+      const ids = (vars as { ids: string[] }).ids;
+      seen.push(ids.length);
+      if (ids.length === 4) {
+        throw new Error("Query exceeds the maximum single query cost");
+      }
+      return rawOk({
+        nodes: ids.map((id) => ({ id, fulfillments: [], refunds: [] })),
+      });
+    });
+    const result = await fetchOrderDetails(
+      client,
+      orders,
+      ["read_orders"],
+      { sleep: async () => {} },
+    );
+    expect(seen).toEqual([4, 2, 2]);
+    expect(result.orders).toHaveLength(4);
+  });
+
+  test("max-cost at size 1 rethrows", async () => {
+    const { client, rawRequest } = fakeClient();
+    rawRequest.mockRejectedValue(
+      new Error("maximum cost of this query exceeds the allowed maximum"),
+    );
+    await expect(
+      fetchOrderDetails(
+        client,
+        [
+          {
+            id: "gid://shopify/Order/1",
+            name: "#1",
+            createdAt: "2026-07-27T03:40:26Z",
+            cancelledAt: null,
+            sourceName: "web",
+            test: false,
+            tags: [],
+            lineItems: [],
+            fulfillments: [],
+            refunds: [],
+          },
+        ],
+        ["read_orders"],
+        { sleep: async () => {} },
+      ),
+    ).rejects.toThrow(/maximum cost/);
+    expect(rawRequest).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("transient retry on idempotent reads", () => {
+  test("502 then success retries once", async () => {
+    const { client, rawRequest } = fakeClient();
+    const sleeper = recordingSleep();
+    const err502 = Object.assign(new Error("Bad Gateway"), {
+      response: { status: 502 },
+    });
+    rawRequest
+      .mockRejectedValueOnce(err502)
+      .mockResolvedValueOnce(
+        rawOk({
+          orders: {
+            edges: [],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        }),
+      );
+    const result = await fetchCandidates(
+      client,
+      { since: "2026-09-01", until: "2026-09-01", tz: CHICAGO },
+      { sleep: sleeper.sleep },
+    );
+    expect(result.orders).toEqual([]);
+    expect(rawRequest).toHaveBeenCalledTimes(2);
+    expect(sleeper.delays).toEqual([1000]);
+    expect(result.maxRequestedQueryCost).toBe(12);
+  });
+
+  test("ECONNRESET twice then success", async () => {
+    const { client, rawRequest } = fakeClient();
+    const sleeper = recordingSleep();
+    const reset = Object.assign(new Error("read ECONNRESET"), {
+      code: "ECONNRESET",
+    });
+    rawRequest
+      .mockRejectedValueOnce(reset)
+      .mockRejectedValueOnce(reset)
+      .mockResolvedValueOnce(
+        rawOk({
+          orders: {
+            edges: [],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        }),
+      );
+    const result = await fetchCandidates(
+      client,
+      { since: "2026-09-01", until: "2026-09-01", tz: CHICAGO },
+      { sleep: sleeper.sleep },
+    );
+    expect(result.orders).toEqual([]);
+    expect(rawRequest).toHaveBeenCalledTimes(3);
+    expect(sleeper.delays).toEqual([1000, 2000]);
+  });
+
+  test("400 is not retried", async () => {
+    const { client, rawRequest } = fakeClient();
+    const sleeper = recordingSleep();
+    const err400 = Object.assign(new Error("Bad Request"), {
+      response: { status: 400 },
+    });
+    rawRequest.mockRejectedValue(err400);
+    await expect(
+      fetchCandidates(
+        client,
+        { since: "2026-09-01", until: "2026-09-01", tz: CHICAGO },
+        { sleep: sleeper.sleep },
+      ),
+    ).rejects.toThrow(/Bad Request/);
+    expect(rawRequest).toHaveBeenCalledTimes(1);
+    expect(sleeper.delays).toEqual([]);
   });
 });
