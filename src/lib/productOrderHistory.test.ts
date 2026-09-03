@@ -103,6 +103,7 @@ function makeParams(overrides: Partial<CountParams> = {}): CountParams {
     includeTestOrders: false,
     asOf: DEFAULT_AS_OF,
     fulfillmentOrderScopesComplete: true,
+    returnsScopeComplete: true,
     ...overrides,
     since,
     until,
@@ -273,6 +274,29 @@ describe("lineMatches", () => {
 });
 
 describe("countUnits empty input", () => {
+  test("returnsScopeComplete false on empty input nulls returns metrics and warns", () => {
+    const result = countUnits(
+      [],
+      makeParams({ returnsScopeComplete: false }),
+    );
+    expect(result.totals.units_returned).toBeNull();
+    expect(result.reconciliation.returns_in_progress).toBeNull();
+    expect(result.reconciliation.refunded_without_return).toBeNull();
+    expect(result.reconciliation.returned_without_refund).toBeNull();
+    expect(result.warnings).toContain(
+      "read_returns scope missing: physical returns unavailable; refunds are reported separately",
+    );
+  });
+
+  test("returnsScopeComplete true on empty input yields 0 and no returns warning", () => {
+    const result = countUnits([], makeParams({ returnsScopeComplete: true }));
+    expect(result.totals.units_returned).toBe(0);
+    expect(result.reconciliation.returns_in_progress).toBe(0);
+    expect(
+      result.warnings.some((w) => w.includes("read_returns scope missing")),
+    ).toBe(false);
+  });
+
   test("zeros, empty buckets for none, zero-filled months for month", () => {
     const none = countUnits([], makeParams({ groupBy: "none" }));
     expect(none.totals).toEqual(zeros(0));
@@ -527,7 +551,7 @@ describe("refunds", () => {
     expect(byKey["2025-05"].refunded_amount).toBe(276.25);
   });
 
-  test("undated refund with null subtotalAmount warns and stays out of units_refunded", () => {
+  test("undated refund with null subtotalAmount stays out of units_refunded", () => {
     const order = makeOrder({
       refunds: [
         makeRefund({
@@ -542,15 +566,18 @@ describe("refunds", () => {
     const result = countUnits([order], makeParams());
     expect(result.totals.units_refunded).toBe(0);
     expect(result.reconciliation.refunds_unattributed).toBe(1);
+    expect(result.reconciliation.refunded_amount_unattributed).toBe(0);
     expect(result.warnings).toContain(
       "1 refund(s) have no createdAt and were not dated",
     );
     expect(
-      result.warnings.some((w) => w.includes("gid://shopify/Refund/undated-null")),
-    ).toBe(true);
+      result.warnings.some((w) =>
+        w.includes("amount unknown"),
+      ),
+    ).toBe(false);
   });
 
-  test("null subtotalAmount -> refunded_amount_unattributed + warning", () => {
+  test("in-window null subtotalAmount counts units, excludes amount, warns", () => {
     const order = makeOrder({
       refunds: [
         makeRefund({
@@ -565,13 +592,30 @@ describe("refunds", () => {
     const result = countUnits([order], makeParams());
     expect(result.totals.units_refunded).toBe(1);
     expect(result.totals.refunded_amount).toBe(0);
+    expect(result.reconciliation.refunded_amount_unattributed).toBe(0);
+    expect(result.warnings).toContain(
+      "Refund gid://shopify/Refund/null-amt: amount unknown for 1 matching line(s); refunded_amount is understated",
+    );
+  });
+
+  test("out-of-window refund with null amount produces no amount-unknown warning", () => {
+    const order = makeOrder({
+      refunds: [
+        makeRefund({
+          id: "gid://shopify/Refund/old-null",
+          createdAt: "2024-01-05T12:00:00Z",
+          lineItems: [
+            { quantity: 2, restockType: "RETURN", lineItemId: LINE_A, subtotalAmount: null },
+          ],
+        }),
+      ],
+    });
+    const result = countUnits([order], makeParams());
+    expect(result.totals.units_refunded).toBe(0);
+    expect(result.totals.refunded_amount).toBe(0);
     expect(
-      result.warnings.some(
-        (w) =>
-          w.includes("gid://shopify/Refund/null-amt") &&
-          w.includes("refunded_amount_unattributed"),
-      ),
-    ).toBe(true);
+      result.warnings.some((w) => w.includes("gid://shopify/Refund/old-null")),
+    ).toBe(false);
   });
 });
 

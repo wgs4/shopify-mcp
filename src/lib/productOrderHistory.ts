@@ -161,6 +161,7 @@ export interface CountParams {
   asOf: string;
   fulfillmentOrderScopesComplete: boolean;
   missingFulfillmentOrderScopes?: string[];
+  returnsScopeComplete: boolean;
 }
 
 export interface UnitCounts {
@@ -582,8 +583,8 @@ export function lineMatches(line: RawLineItem, params: CountParams): boolean {
 export function countUnits(orders: RawOrder[], params: CountParams): CountResult {
   const time = params.time;
   const warnings: string[] = [];
-  const returnsMissing = orders.some((o) => o.returns === null);
-  const unitsReturnedOut: number | null = returnsMissing ? null : 0;
+  const returnsMissing =
+    !params.returnsScopeComplete || orders.some((o) => o.returns === null);
 
   let testExcluded = 0;
   const matched: RawOrder[] = [];
@@ -745,14 +746,14 @@ export function countUnits(orders: RawOrder[], params: CountParams): CountResult
     for (const refund of order.refunds) {
       let matchingQty = 0;
       let matchingAmount = 0;
+      let matchingNullAmountLines = 0;
       let hadMatching = false;
-      let hadNullAmount = false;
       for (const li of refund.lineItems) {
         if (!matchingIdSet.has(li.lineItemId)) continue;
         hadMatching = true;
         matchingQty += li.quantity;
         if (li.subtotalAmount === null) {
-          hadNullAmount = true;
+          matchingNullAmountLines += 1;
         } else {
           matchingAmount += li.subtotalAmount;
         }
@@ -763,21 +764,16 @@ export function countUnits(orders: RawOrder[], params: CountParams): CountResult
         undatedRefunds += 1;
         refundsUnattributed += matchingQty;
         refundedAmountUnattributed += matchingAmount;
-        if (hadNullAmount) {
-          warnings.push(
-            `Refund ${refund.id} has a null subtotalAmount on a matching line and was counted in refunded_amount_unattributed`,
-          );
-        }
         continue;
       }
 
-      if (hadNullAmount) {
+      if (!time.inWindow(refund.createdAt)) continue;
+
+      if (matchingNullAmountLines > 0) {
         warnings.push(
-          `Refund ${refund.id} has a null subtotalAmount on a matching line and was counted in refunded_amount_unattributed`,
+          `Refund ${refund.id}: amount unknown for ${matchingNullAmountLines} matching line(s); refunded_amount is understated`,
         );
       }
-
-      if (!time.inWindow(refund.createdAt)) continue;
 
       add("units_refunded", matchingQty, refund.createdAt);
       add("refunded_amount", matchingAmount, refund.createdAt);
