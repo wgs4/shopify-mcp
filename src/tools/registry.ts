@@ -68,6 +68,7 @@ import { shopifyqlQuery } from "./shopifyqlQuery.js";
 import { listShopifyPayouts } from "./listShopifyPayouts.js";
 import { getShopifyPayout } from "./getShopifyPayout.js";
 import { shopifyPayoutAutoReconcile } from "./shopifyPayoutAutoReconcile.js";
+import { getProductOrderHistory } from "./getProductOrderHistory.js";
 
 export const tools: ShopifyTool[] = [
   // Products (8)
@@ -129,4 +130,6 @@ export const tools: ShopifyTool[] = [
   listShopifyPayouts,
   getShopifyPayout,
   shopifyPayoutAutoReconcile,
+  // Product order history (1)
+  getProductOrderHistory,
 ];

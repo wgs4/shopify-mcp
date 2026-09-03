@@ -1,6 +1,11 @@
 import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
+import {
+  FULFILLMENT_ORDER_SCOPES,
+  isAccessDeniedError,
+  missingScopeError,
+} from "../lib/accessScopes.js";
 import { edgesToNodes, handleToolError } from "../lib/toolUtils.js";
 
 const GetFulfillmentOrdersInputSchema = z.object({
@@ -117,6 +122,11 @@ const getFulfillmentOrders = {
         fulfillmentOrders,
       };
     } catch (error) {
+      if (isAccessDeniedError(error)) {
+        throw missingScopeError("fulfillmentOrders", [
+          ...FULFILLMENT_ORDER_SCOPES,
+        ]);
+      }
       handleToolError("fetch fulfillment orders", error);
     }
   },

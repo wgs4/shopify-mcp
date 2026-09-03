@@ -56,14 +56,44 @@ export function checkUserErrors(
   }
 }
 
+const TYPED_ERROR_NAMES = new Set([
+  "ScopeHorizonError",
+  "MissingScopeError",
+  "BulkOperationError",
+]);
+
+/**
+ * True for typed errors that the MCP host should see unwrapped: named
+ * ScopeHorizonError / MissingScopeError / BulkOperationError, or any
+ * object with a string `code` property (the typed-error convention used
+ * by those classes and by missingScopeError).
+ */
+function isTypedToolError(error: unknown): boolean {
+  if (error == null || typeof error !== "object") {
+    return false;
+  }
+  const rec = error as { name?: unknown; code?: unknown };
+  if (typeof rec.name === "string" && TYPED_ERROR_NAMES.has(rec.name)) {
+    return true;
+  }
+  return typeof rec.code === "string";
+}
+
 /**
  * Catch handler that doesn't re-wrap errors already thrown by checkUserErrors.
  * Fixes the double-wrapping bug where "Failed to X: Failed to X: actual message"
  * was produced by every mutation tool.
+ *
+ * Typed errors (ScopeHorizonError, MissingScopeError, BulkOperationError, or
+ * any error with a string `code`) are re-thrown untouched so the MCP host
+ * sees the original name, code, and self-contained message.
  */
 export function handleToolError(operation: string, error: unknown): never {
   // If the error already has our "Failed to" prefix, re-throw as-is
   if (error instanceof Error && error.message.startsWith("Failed to ")) {
+    throw error;
+  }
+  if (isTypedToolError(error)) {
     throw error;
   }
   const message = error instanceof Error ? error.message : String(error);
