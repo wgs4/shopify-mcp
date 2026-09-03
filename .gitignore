@@ -22,3 +22,6 @@ build/
 # OS Files
 .DS_Store
 Thumbs.db 
+
+# Autonomous-run artifacts (see ~/.claude/skills/shared-guidelines)
+.agent-loop/
