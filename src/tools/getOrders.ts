@@ -19,7 +19,13 @@ const GetOrdersInputSchema = z.object({
     "ID", "RELEVANCE"
   ]).optional().describe("Sort key for orders"),
   reverse: z.boolean().optional().describe("Reverse the sort order"),
-  query: z.string().optional().describe("Raw query string for advanced filtering (e.g. 'financial_status:paid fulfillment_status:shipped')")
+  query: z
+    .string()
+    .max(4096)
+    .optional()
+    .describe(
+      "Raw query string for advanced filtering (e.g. 'financial_status:paid fulfillment_status:shipped'). Without read_all_orders, any date predicate must include a conjunctive created_at:>= bound on/after the 60-day horizon (see the response `horizon` block: horizon.first_visible_date); upper-only, updated_at/processed_at-only, OR, NOT/negated or malformed date predicates throw ScopeHorizonError.",
+    ),
 });
 
 type GetOrdersInput = z.infer<typeof GetOrdersInputSchema>;

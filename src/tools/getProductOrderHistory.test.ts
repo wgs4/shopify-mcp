@@ -292,8 +292,10 @@ describe("60-day wall", () => {
       expect(err).toBeInstanceOf(ScopeHorizonError);
       expect((err as ScopeHorizonError).name).toBe("ScopeHorizonError");
       expect((err as ScopeHorizonError).reason).toBe("visibility_indeterminate");
+      expect((err as Error).message.startsWith("ScopeHorizonError: ")).toBe(true);
       expect((err as Error).message).toContain("read_all_orders");
       expect((err as Error).message).toMatch(/allow_incomplete/);
+      expect((err as Error).message).toContain("Earliest accepted bound");
     }
   });
 

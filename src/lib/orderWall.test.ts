@@ -14,6 +14,7 @@ import {
   completenessInfo,
   computeHorizon,
   extractDateBounds,
+  firstVisibleDate,
   guardOrderQuery,
   horizonInfo,
 } from "./orderWall.js";
@@ -52,8 +53,9 @@ function expectBeforeHorizon(fn: () => unknown): ScopeHorizonError {
     expect(e.message.startsWith("ScopeHorizonError: ")).toBe(true);
     expect(e.message).toContain(READ_ALL_ORDERS);
     expect(e.message).toContain(HORIZON);
+    expect(e.message).toContain("Earliest accepted bound");
     expect(e.message).toContain(
-      "Request the scope for app shop-wgs-mcp-8-6-26 or narrow the range.",
+      "Request read_all_orders for app shop-wgs-mcp-8-6-26 to see older orders.",
     );
     return e;
   }
@@ -76,8 +78,9 @@ function expectIndeterminate(fn: () => unknown): ScopeHorizonError {
     expect(e.message).toMatch(/cannot prove the result is complete/);
     expect(e.message).toContain(READ_ALL_ORDERS);
     expect(e.message).toContain(HORIZON);
+    expect(e.message).toContain("Earliest accepted bound");
     expect(e.message).toContain(
-      "Request the scope for app shop-wgs-mcp-8-6-26 or narrow the range.",
+      "Request read_all_orders for app shop-wgs-mcp-8-6-26 to see older orders.",
     );
     return e;
   }
@@ -108,6 +111,7 @@ describe("horizonInfo / completenessInfo", () => {
     expect(info.wall_days).toBe(60);
     expect(info.horizon).toBe(HORIZON);
     expect(info.horizon_shop_date).toBe(localDate(HORIZON, CHICAGO));
+    expect(info.first_visible_date).toBe("2026-07-06");
     expect(info.scope_missing).toBe(READ_ALL_ORDERS);
   });
 
@@ -608,5 +612,101 @@ describe("guardOrderQuery", () => {
       expect(info.scope_missing).toBe(READ_ALL_ORDERS);
       expect(info.horizon).toBe(HORIZON);
     }
+  });
+});
+
+describe("firstVisibleDate", () => {
+  test("exact-midnight horizon uses that UTC date", () => {
+    expect(firstVisibleDate("2026-07-05T00:00:00.000Z")).toBe("2026-07-05");
+  });
+
+  test("mid-day horizon uses the next UTC calendar date", () => {
+    expect(firstVisibleDate(HORIZON)).toBe("2026-07-06");
+    expect(firstVisibleDate("2026-07-05T00:00:00.001Z")).toBe("2026-07-06");
+  });
+});
+
+describe("guard-accepted advice date", () => {
+  test("indeterminate advice date used as created_at:>= is accepted", () => {
+    const err = expectIndeterminate(() => guard("created_at:<2026-09-01"));
+    expect(err.message).toContain("Earliest accepted bound");
+    const match = /created_at:>=(\d{4}-\d{2}-\d{2})/.exec(err.message);
+    expect(match).not.toBeNull();
+    const date = match![1];
+    expect(date).toBe("2026-07-06");
+    expect(() => guard(`created_at:>=${date}`)).not.toThrow();
+  });
+
+  test("before_horizon message also contains Earliest accepted bound", () => {
+    const err = expectBeforeHorizon(() => guard("created_at:>=2025-01-01"));
+    expect(err.message).toContain("Earliest accepted bound");
+    expect(err.message).toContain("created_at:>=2026-07-06");
+  });
+});
+
+describe("parenthesised groups", () => {
+  test("NOT (created_at:>=X tag:y) is indeterminate", () => {
+    expectIndeterminate(() =>
+      guard("NOT (created_at:>=2026-08-01 tag:y)"),
+    );
+  });
+
+  test("-(created_at:>=X tag:y) is indeterminate", () => {
+    expectIndeterminate(() =>
+      guard("-(created_at:>=2026-08-01 tag:y)"),
+    );
+  });
+
+  test("tag:a NOT (tag:b created_at:>=X ) is indeterminate", () => {
+    expectIndeterminate(() =>
+      guard("tag:a NOT (tag:b created_at:>=2026-08-01 )"),
+    );
+  });
+
+  test("(tag:a OR tag:b) without dates does not throw", () => {
+    expect(() => guard("(tag:a OR tag:b)")).not.toThrow();
+    const a = analyzeDatePredicates("(tag:a OR tag:b)");
+    expect(a.predicates).toEqual([]);
+    expect(a.indeterminate).toBe(false);
+  });
+});
+
+describe("OR token is unquoted uppercase whitespace-delimited", () => {
+  test("quoted lowercase or and OR inside a name are allowed", () => {
+    expect(() =>
+      guard("created_at:>=2026-08-01 tag:'pre or post'"),
+    ).not.toThrow();
+    expect(() =>
+      guard("created_at:>=2026-08-01 name:OR-1234"),
+    ).not.toThrow();
+    expect(
+      analyzeDatePredicates("created_at:>=2026-08-01 tag:'pre or post'").hasOr,
+    ).toBe(false);
+    expect(
+      analyzeDatePredicates("created_at:>=2026-08-01 name:OR-1234").hasOr,
+    ).toBe(false);
+  });
+
+  test("unquoted uppercase OR is indeterminate", () => {
+    expectIndeterminate(() =>
+      guard("created_at:>=2026-08-01 OR tag:x"),
+    );
+    expect(
+      analyzeDatePredicates("created_at:>=2026-08-01 OR tag:x").hasOr,
+    ).toBe(true);
+  });
+});
+
+describe("analyzeDatePredicates performance", () => {
+  test("8000 repeated predicates (200 kB) analyze in under 200 ms", () => {
+    const pred = "created_at:>=2026-08-01 tag:keep ";
+    const query = pred.repeat(8000);
+    expect(query.length).toBeGreaterThanOrEqual(200_000);
+    const t0 = Date.now();
+    const a = analyzeDatePredicates(query);
+    const elapsed = Date.now() - t0;
+    expect(elapsed).toBeLessThan(200);
+    expect(a.predicates).toHaveLength(8000);
+    expect(a.indeterminate).toBe(false);
   });
 });

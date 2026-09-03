@@ -9,7 +9,9 @@
  * would treat it as truth. We fail closed instead.
  *
  * Horizon comparisons are instant-to-instant (Date.parse on ISO strings).
- * Shop-local dates are display-only (horizon_shop_date).
+ * Shop-local dates are display-only (horizon_shop_date). Bare YYYY-MM-DD
+ * predicates are parsed as UTC midnight, so first_visible_date is the
+ * earliest bare date the guard accepts (UTC midnight >= horizon).
  *
  * Pipelines:
  *
@@ -35,8 +37,8 @@ export const ORDER_WALL_DAYS = 60 as const;
 export const READ_ALL_ORDERS = "read_all_orders";
 
 const MS_PER_DAY = 86_400_000;
-const ASK_SCOPE =
-  "Request the scope for app shop-wgs-mcp-8-6-26 or narrow the range.";
+const ASK_SCOPE_PREFIX =
+  "Earliest accepted bound: created_at:>=";
 
 const YEAR_RE = /^\d{4}$/;
 const DATETIME_RE =
@@ -77,6 +79,7 @@ export interface HorizonInfo {
   wall_days: 60;
   horizon: string;
   horizon_shop_date: string | null;
+  first_visible_date: string;
   scope_missing: "read_all_orders" | null;
 }
 
@@ -108,25 +111,56 @@ function hasReadAllOrders(scopes: string[]): boolean {
   return scopes.includes(READ_ALL_ORDERS);
 }
 
+/**
+ * First YYYY-MM-DD whose UTC midnight is >= the horizon instant.
+ * Exact 00:00:00.000Z uses that date; any later time of day uses the next
+ * UTC calendar date. Bare Shopify date predicates parse as UTC midnight,
+ * so this is the earliest `created_at:>=YYYY-MM-DD` the guard accepts.
+ */
+export function firstVisibleDate(horizonIso: string): string {
+  const ms = Date.parse(horizonIso);
+  if (!Number.isFinite(ms)) {
+    return horizonIso.slice(0, 10);
+  }
+  const utc = new Date(ms).toISOString();
+  const date = utc.slice(0, 10);
+  if (utc.slice(11) === "00:00:00.000Z") {
+    return date;
+  }
+  const midnightMs = Date.parse(`${date}T00:00:00.000Z`);
+  return new Date(midnightMs + MS_PER_DAY).toISOString().slice(0, 10);
+}
+
+/**
+ * Concrete, guard-accepted lower-bound advice. ScopeHorizonError messages
+ * (and the product-history indeterminate override) must end with this.
+ */
+export function earliestAcceptedBoundAdvice(horizonIso: string): string {
+  const date = firstVisibleDate(horizonIso);
+  return (
+    `${ASK_SCOPE_PREFIX}${date} (or created_at:>='${horizonIso}'). ` +
+    `Request read_all_orders for app shop-wgs-mcp-8-6-26 to see older orders.`
+  );
+}
+
 function buildScopeHorizonMessage(args: ScopeHorizonErrorArgs): string {
   const shop = args.horizonShopDate
     ? ` (shop date ${args.horizonShopDate})`
     : "";
   const since = args.requestedSince ?? "null";
   const until = args.requestedUntil ?? "null";
+  const advice = earliestAcceptedBoundAdvice(args.horizon);
   if (args.reason === "visibility_indeterminate") {
-    const bound = args.horizonShopDate ?? args.horizon;
     return (
       `ScopeHorizonError: the query mentions order dates in a way that cannot prove the result is complete ` +
       `(visible from ${args.horizon}${shop}). ` +
-      `Add a conjunctive created_at:>=${bound} lower bound or obtain ${args.missing}. ` +
-      ASK_SCOPE
+      advice
     );
   }
   return (
     `ScopeHorizonError: orders before ${args.horizon}${shop} are not visible without ${args.missing}. ` +
     `Requested since=${since} until=${until}. ` +
-    ASK_SCOPE
+    advice
   );
 }
 
@@ -169,6 +203,7 @@ export function horizonInfo(
     wall_days: ORDER_WALL_DAYS,
     horizon,
     horizon_shop_date: tz ? localDate(horizon, tz) : null,
+    first_visible_date: firstVisibleDate(horizon),
     scope_missing: hasReadAllOrders(scopes) ? null : READ_ALL_ORDERS,
   };
 }
@@ -390,8 +425,15 @@ function isNegatedAt(query: string, fieldIndex: number): boolean {
   if (fieldIndex > 0 && query[fieldIndex - 1] === "-") {
     return true;
   }
-  const before = query.slice(0, fieldIndex);
-  return /\bNOT\s+$/i.test(before);
+  // Bounded tail so a 200 kB query of thousands of predicates stays O(n)
+  // in the input length, not O(n * prefix) from a growing regex scan.
+  const before = query.slice(Math.max(0, fieldIndex - 8), fieldIndex);
+  return /(^|\s|\()NOT\s+$/i.test(before);
+}
+
+function hasUnquotedOrToken(query: string): boolean {
+  const stripped = query.replace(/"[^"]*"|'[^']*'/g, " ");
+  return /(^|\s)OR(\s|$)/.test(stripped);
 }
 
 function latestIso(a: string, b: string): string {
@@ -407,7 +449,9 @@ function earliestIso(a: string, b: string): string {
  *
  * created_at / processed_at / updated_at (case-insensitive), optional
  * operator, quoted or bare values, ISO datetimes, YYYY-MM-DD, YYYY, or a..b
- * ranges. A leading `-` or the word NOT negates. Standalone OR sets hasOr.
+ * ranges. A leading `-` or the word NOT negates. An unquoted uppercase
+ * whitespace-delimited OR sets hasOr. Parentheses around a date predicate
+ * make the analysis indeterminate.
  */
 export function analyzeDatePredicates(
   query: string | null | undefined,
@@ -422,7 +466,7 @@ export function analyzeDatePredicates(
       indeterminateReasons: [],
     };
   }
-  const hasOr = /\bOR\b/i.test(query);
+  const hasOr = hasUnquotedOrToken(query);
   PREDICATE_RE.lastIndex = 0;
   for (const match of query.matchAll(PREDICATE_RE)) {
     const raw = match[0];
@@ -497,6 +541,14 @@ export function analyzeDatePredicates(
   if (predicates.length > 0 && createdAtLowerIso == null) {
     indeterminateReasons.push(
       "no conjunctive created_at lower bound; query can reach before the horizon",
+    );
+  }
+  if (
+    predicates.length > 0 &&
+    (query.includes("(") || query.includes(")"))
+  ) {
+    indeterminateReasons.push(
+      "parenthesised groups cannot be proven conjunctive",
     );
   }
 

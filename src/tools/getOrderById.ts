@@ -38,7 +38,7 @@ const getOrderById = {
       const throwNotFound = (fallback: string): never => {
         if (horizon.scope_missing === READ_ALL_ORDERS) {
           throw new Error(
-            `Order ${orderId} not found. Orders created before ${horizon.horizon_shop_date} (${horizon.horizon}) are hidden from this token: read_all_orders is missing (60-day window).`,
+            `Order ${orderId} not found. Orders created before first_visible_date ${horizon.first_visible_date} (${horizon.horizon}) are hidden from this token: read_all_orders is missing (60-day window).`,
           );
         }
         throw new Error(fallback);

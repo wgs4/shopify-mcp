@@ -48,6 +48,7 @@ import {
   ScopeHorizonError,
   assertRangeVisible,
   completenessInfo,
+  earliestAcceptedBoundAdvice,
   horizonInfo,
 } from "../lib/orderWall.js";
 import {
@@ -71,32 +72,38 @@ const GetProductOrderHistoryObjectSchema = z.object({
     .min(1)
     .max(20)
     .optional()
-    .describe("1-20 SKUs to count (exactly one of skus or productId)"),
+    .describe(
+      "Exact, case-insensitive match on each line item's recorded SKU (not the variant's current SKU); pass every historical SKU of the product, max 20",
+    ),
   productId: z
     .string()
     .min(1)
     .optional()
-    .describe("Product GID or numeric id (exactly one of skus or productId)"),
+    .describe("Numeric or gid product id; matches lineItem.product.id"),
   since: z
     .string()
     .refine((value) => isValidDate(value), {
       message: "since must be a valid YYYY-MM-DD date",
     })
-    .describe("Inclusive shop-local start date (YYYY-MM-DD)"),
+    .describe("YYYY-MM-DD in the shop timezone, inclusive"),
   until: z
     .string()
     .refine((value) => isValidDate(value), {
       message: "until must be a valid YYYY-MM-DD date",
     })
-    .describe("Inclusive shop-local end date (YYYY-MM-DD)"),
+    .describe("YYYY-MM-DD in the shop timezone, inclusive"),
   basis: z
     .enum(["fulfillment", "order", "refund"])
     .default("fulfillment")
-    .describe("Which clock counts an order toward `orders`"),
+    .describe(
+      "Which event dates an order into `orders` (unit totals are unaffected): fulfillment = a SUCCESS fulfillment containing the SKU, order = order createdAt, refund = a refund containing the SKU",
+    ),
   group_by: z
     .enum(["none", "month", "channel"])
     .default("none")
-    .describe("Optional bucket key"),
+    .describe(
+      "month = every metric bucketed by its own event month in the shop timezone, zero-filled; channel = order.sourceName",
+    ),
   include_test_orders: z
     .boolean()
     .default(false)
@@ -104,12 +111,14 @@ const GetProductOrderHistoryObjectSchema = z.object({
   include_orders: z
     .boolean()
     .default(false)
-    .describe("Include per-order evidence in the response"),
+    .describe(
+      "Return per-order evidence rows (capped at 500; see orders_truncated and matched_orders)",
+    ),
   allow_incomplete: z
     .boolean()
     .default(false)
     .describe(
-      "Run without read_all_orders and accept completeness.status=partial",
+      "Without read_all_orders the tool fails closed; set true to run anyway with completeness.status=partial and horizon_ok=false (never use such output as historical acceptance)",
     ),
   force_bulk: z
     .boolean()
@@ -143,7 +152,6 @@ function visibilityIndeterminateError(
   tz: string,
 ): ScopeHorizonError {
   const info = horizonInfo(scopes, undefined, tz);
-  const bound = info.horizon_shop_date ?? info.horizon;
   const err = new ScopeHorizonError({
     missing: READ_ALL_ORDERS,
     horizon: info.horizon,
@@ -154,10 +162,11 @@ function visibilityIndeterminateError(
     visibleFrom: info.horizon,
   });
   err.message =
-    `ScopeHorizonError: read_all_orders is missing, so orders created before ${bound} are hidden ` +
+    `ScopeHorizonError: read_all_orders is missing, so orders created before ${info.first_visible_date} are hidden ` +
     `and any window can be incomplete (an older order shipped or refunded ` +
     `inside the window would be missed). Pass allow_incomplete=true to run ` +
-    `anyway with completeness.status=partial, or obtain the scope.`;
+    `anyway with completeness.status=partial. ` +
+    earliestAcceptedBoundAdvice(info.horizon);
   return err;
 }
 
@@ -264,6 +273,7 @@ const getProductOrderHistory = {
         asOf,
         fulfillmentOrderScopesComplete: foComplete,
         missingFulfillmentOrderScopes: missingFulfillmentOrderScopes(scopes),
+        returnsScopeComplete: hasScope(scopes, "read_returns"),
       });
 
       const warnings = leadWarnings.concat(result.warnings);
@@ -301,6 +311,10 @@ const getProductOrderHistory = {
         candidate_orders: scan.orders.length,
         requests: scan.requests + details.requests,
         query: scan.query,
+        max_requested_query_cost: Math.max(
+          scan.maxRequestedQueryCost,
+          details.maxRequestedQueryCost,
+        ),
       };
       response.reconciliation = result.reconciliation;
       response.buckets = result.buckets;
