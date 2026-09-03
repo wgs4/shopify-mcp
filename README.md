@@ -110,6 +110,8 @@ Locations for the Claude Desktop config file:
 
 ### Usage with Claude Code
 
+WGS production deploy (four storefront processes on the VM, pull + build, rollback) is documented in [docs/DEPLOY.md](docs/DEPLOY.md).
+
 **Client Credentials:**
 
 ```bash
