@@ -1,8 +1,14 @@
 import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { handleToolError, edgesToNodes } from "../lib/toolUtils.js";
+import { getAccessScopes } from "../lib/accessScopes.js";
 import { formatLineItems, formatOrderSummary } from "../lib/formatters.js";
+import {
+  getOldestVisibleOrderCreatedAt,
+  getShopTimezone,
+} from "../lib/orderHistoryFetch.js";
+import { READ_ALL_ORDERS, horizonInfo } from "../lib/orderWall.js";
+import { handleToolError, edgesToNodes } from "../lib/toolUtils.js";
 
 // Input schema for getOrderById
 const GetOrderByIdInputSchema = z.object({
@@ -27,6 +33,21 @@ const getOrderById = {
   execute: async (input: GetOrderByIdInput) => {
     try {
       const { orderId } = input;
+
+      const scopes = await getAccessScopes(shopifyClient);
+      const tz = await getShopTimezone(shopifyClient);
+      const horizon = horizonInfo(scopes, undefined, tz);
+      horizon.oldest_visible_order_created_at =
+        await getOldestVisibleOrderCreatedAt(shopifyClient);
+
+      const throwNotFound = (fallback: string): never => {
+        if (horizon.scope_missing === READ_ALL_ORDERS) {
+          throw new Error(
+            `Order ${orderId} not found. Orders created before first_visible_date ${horizon.first_visible_date} (${horizon.horizon}) are hidden from this token: read_all_orders is missing (60-day window).`,
+          );
+        }
+        throw new Error(fallback);
+      };
 
       // Smart lookup: detect format and resolve to GID
       let resolvedId: string;
@@ -56,7 +77,7 @@ const getOrderById = {
         })) as { orders: { edges: Array<{ node: { id: string } }> } };
 
         if (nameData.orders.edges.length === 0) {
-          throw new Error(`Order with name ${orderName} not found`);
+          throwNotFound(`Order with name ${orderName} not found`);
         }
         resolvedId = nameData.orders.edges[0].node.id;
       } else if (/^\d+$/.test(trimmed)) {
@@ -192,7 +213,7 @@ const getOrderById = {
       };
 
       if (!data.order) {
-        throw new Error(`Order with ID ${orderId} not found`);
+        throwNotFound(`Order with ID ${orderId} not found`);
       }
 
       // Extract and format order data
@@ -219,7 +240,7 @@ const getOrderById = {
         metafields: edgesToNodes(order.metafields),
       };
 
-      return { order: formattedOrder };
+      return { order: formattedOrder, horizon };
     } catch (error) {
       handleToolError("fetch order", error);
     }

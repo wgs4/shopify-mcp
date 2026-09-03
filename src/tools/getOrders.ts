@@ -1,8 +1,14 @@
 import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { handleToolError, edgesToNodes, type ShopifyConnection } from "../lib/toolUtils.js";
+import { getAccessScopes } from "../lib/accessScopes.js";
 import { formatOrderSummary } from "../lib/formatters.js";
+import {
+  getOldestVisibleOrderCreatedAt,
+  getShopTimezone,
+} from "../lib/orderHistoryFetch.js";
+import { guardOrderQuery } from "../lib/orderWall.js";
+import { handleToolError, edgesToNodes, type ShopifyConnection } from "../lib/toolUtils.js";
 
 // Input schema for getOrders
 const GetOrdersInputSchema = z.object({
@@ -16,7 +22,13 @@ const GetOrdersInputSchema = z.object({
     "ID", "RELEVANCE"
   ]).optional().describe("Sort key for orders"),
   reverse: z.boolean().optional().describe("Reverse the sort order"),
-  query: z.string().optional().describe("Raw query string for advanced filtering (e.g. 'financial_status:paid fulfillment_status:shipped')")
+  query: z
+    .string()
+    .max(4096)
+    .optional()
+    .describe(
+      "Raw query string for advanced filtering (e.g. 'financial_status:paid fulfillment_status:shipped'). Without read_all_orders, any date predicate must include a conjunctive created_at:>= bound on/after the 60-day horizon (see the response `horizon` block: horizon.first_visible_date); upper-only, updated_at/processed_at-only, OR, NOT/negated or malformed date predicates throw ScopeHorizonError.",
+    ),
 });
 
 type GetOrdersInput = z.infer<typeof GetOrdersInputSchema>;
@@ -47,6 +59,12 @@ const getOrders = {
         queryParts.push(rawQuery);
       }
       const queryFilter = queryParts.join(" ") || undefined;
+
+      const scopes = await getAccessScopes(shopifyClient);
+      const tz = await getShopTimezone(shopifyClient);
+      const horizon = guardOrderQuery({ scopes, query: queryFilter, tz });
+      horizon.oldest_visible_order_created_at =
+        await getOldestVisibleOrderCreatedAt(shopifyClient);
 
       const query = gql`
         #graphql
@@ -153,7 +171,8 @@ const getOrders = {
 
       return {
         orders,
-        pageInfo: data.orders.pageInfo
+        pageInfo: data.orders.pageInfo,
+        horizon,
       };
     } catch (error) {
       handleToolError("fetch orders", error);
