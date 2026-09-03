@@ -3,7 +3,10 @@ import { gql } from "graphql-request";
 import { z } from "zod";
 import { getAccessScopes } from "../lib/accessScopes.js";
 import { formatLineItems, formatOrderSummary } from "../lib/formatters.js";
-import { getShopTimezone } from "../lib/orderHistoryFetch.js";
+import {
+  getOldestVisibleOrderCreatedAt,
+  getShopTimezone,
+} from "../lib/orderHistoryFetch.js";
 import { READ_ALL_ORDERS, horizonInfo } from "../lib/orderWall.js";
 import { handleToolError, edgesToNodes } from "../lib/toolUtils.js";
 
@@ -34,6 +37,8 @@ const getOrderById = {
       const scopes = await getAccessScopes(shopifyClient);
       const tz = await getShopTimezone(shopifyClient);
       const horizon = horizonInfo(scopes, undefined, tz);
+      horizon.oldest_visible_order_created_at =
+        await getOldestVisibleOrderCreatedAt(shopifyClient);
 
       const throwNotFound = (fallback: string): never => {
         if (horizon.scope_missing === READ_ALL_ORDERS) {

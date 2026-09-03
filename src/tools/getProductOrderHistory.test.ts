@@ -11,7 +11,10 @@ import {
   FO_DETAIL_SCOPES,
   _resetForTest as resetFetch,
 } from "../lib/orderHistoryFetch.js";
-import { ScopeHorizonError } from "../lib/orderWall.js";
+import { computeHorizon, ScopeHorizonError } from "../lib/orderWall.js";
+import { getCustomerOrders } from "./getCustomerOrders.js";
+import { getOrderById } from "./getOrderById.js";
+import { getOrders } from "./getOrders.js";
 import { getProductOrderHistory } from "./getProductOrderHistory.js";
 
 afterEach(() => {
@@ -173,6 +176,13 @@ function scriptClient(
     }
     if (name === "ShopTimezone" || String(query).includes("ShopTimezone")) {
       return { shop: { ianaTimezone: opts.tz ?? CHICAGO } };
+    }
+    if (name === "OldestVisibleOrder" || String(query).includes("OldestVisibleOrder")) {
+      return {
+        orders: {
+          edges: [{ node: { createdAt: "2026-07-10T12:00:00Z" } }],
+        },
+      };
     }
     throw new Error(`unexpected request operation ${name || String(query)}`);
   });
@@ -346,6 +356,40 @@ describe("60-day wall", () => {
       visible_from: null,
     });
     expect((result.horizon as { scope_missing: string | null }).scope_missing).toBeNull();
+  });
+
+  test("horizon.horizon, completeness.visible_from, and reconciliation.as_of share one clock", async () => {
+    const nowMs = Date.parse("2026-09-03T12:00:00.000Z");
+    const spy = jest.spyOn(Date, "now").mockReturnValue(nowMs);
+    try {
+      const { result } = await run(
+        {
+          skus: [MATCHING_SKU],
+          since: "2026-08-01",
+          until: "2026-09-03",
+          allow_incomplete: true,
+        },
+        ["read_orders"],
+      );
+      const horizon = result.horizon as {
+        horizon: string;
+        oldest_visible_order_created_at: string | null;
+      };
+      const completeness = result.completeness as {
+        visible_from: string | null;
+      };
+      const reconciliation = result.reconciliation as { as_of: string };
+      expect(horizon.horizon).toBe("2026-07-05T12:00:00.000Z");
+      expect(completeness.visible_from).toBe("2026-07-05T12:00:00.000Z");
+      expect(horizon.horizon).toBe(completeness.visible_from);
+      expect(reconciliation.as_of).toBe("2026-09-03T12:00:00.000Z");
+      expect(horizon.horizon).toBe(computeHorizon(Date.parse(reconciliation.as_of)));
+      expect(horizon.oldest_visible_order_created_at).toBe(
+        "2026-07-10T12:00:00Z",
+      );
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 
@@ -666,5 +710,110 @@ describe("response extras", () => {
     expect(result.product_id).toBe("gid://shopify/Product/1");
     expect(result.skus).toBeUndefined();
     expect(result.units_ordered).toBe(1);
+  });
+});
+
+const MONEY = { shopMoney: { amount: "1.00", currencyCode: "USD" } };
+
+function stubListOrderNode() {
+  return {
+    id: "gid://shopify/Order/1",
+    name: "#1",
+    createdAt: "2026-08-01T00:00:00Z",
+    displayFinancialStatus: "PAID",
+    displayFulfillmentStatus: "FULFILLED",
+    totalPriceSet: MONEY,
+    subtotalPriceSet: MONEY,
+    totalShippingPriceSet: MONEY,
+    totalTaxSet: MONEY,
+    customer: null,
+    shippingAddress: null,
+    lineItems: { edges: [] },
+    tags: [],
+    note: null,
+    metafields: { edges: [] },
+  };
+}
+
+function orderToolClient() {
+  const { client, request } = fakeClient();
+  request.mockImplementation(async (query: unknown) => {
+    const name = opName(query);
+    if (name === "CurrentAccessScopes" || String(query).includes("CurrentAccessScopes")) {
+      return scopePayload(["read_orders"]);
+    }
+    if (name === "ShopTimezone" || String(query).includes("ShopTimezone")) {
+      return { shop: { ianaTimezone: CHICAGO } };
+    }
+    if (name === "OldestVisibleOrder" || String(query).includes("OldestVisibleOrder")) {
+      return {
+        orders: {
+          edges: [{ node: { createdAt: "2026-07-10T12:00:00Z" } }],
+        },
+      };
+    }
+    if (
+      name === "GetOrders" ||
+      name === "GetCustomerOrders" ||
+      String(query).includes("GetOrders") ||
+      String(query).includes("GetCustomerOrders")
+    ) {
+      return {
+        orders: {
+          edges: [],
+          pageInfo: {
+            hasNextPage: false,
+            hasPreviousPage: false,
+            startCursor: null,
+            endCursor: null,
+          },
+        },
+      };
+    }
+    if (name === "GetOrderById" || String(query).includes("GetOrderById")) {
+      return { order: stubListOrderNode() };
+    }
+    throw new Error(`unexpected request operation ${name || String(query)}`);
+  });
+  return { client, request };
+}
+
+describe("oldest_visible_order_created_at on order tools", () => {
+  test("get-orders / get-customer-orders / get-order-by-id attach the probe; cache hits within TTL", async () => {
+    const { client, request } = orderToolClient();
+
+    getOrders.initialize(client);
+    const listed = (await getOrders.execute({
+      status: "any",
+      limit: 10,
+    })) as {
+      horizon: { oldest_visible_order_created_at: string | null };
+    };
+    expect(listed.horizon.oldest_visible_order_created_at).toBe(
+      "2026-07-10T12:00:00Z",
+    );
+
+    getCustomerOrders.initialize(client);
+    const customer = (await getCustomerOrders.execute({
+      customerId: "1",
+      limit: 10,
+    })) as { horizon: { oldest_visible_order_created_at: string | null } };
+    expect(customer.horizon.oldest_visible_order_created_at).toBe(
+      "2026-07-10T12:00:00Z",
+    );
+
+    getOrderById.initialize(client);
+    const byId = (await getOrderById.execute({
+      orderId: "gid://shopify/Order/1",
+    })) as { horizon: { oldest_visible_order_created_at: string | null } };
+    expect(byId.horizon.oldest_visible_order_created_at).toBe(
+      "2026-07-10T12:00:00Z",
+    );
+
+    const oldestCalls = request.mock.calls.filter(
+      (call) => opName(call[0]) === "OldestVisibleOrder",
+    );
+    expect(oldestCalls).toHaveLength(1);
+    expect(String(oldestCalls[0][0])).toMatch(/sortKey:\s*CREATED_AT/);
   });
 });

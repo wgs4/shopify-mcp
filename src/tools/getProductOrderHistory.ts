@@ -37,6 +37,7 @@ import { getAccessScopes, hasScope } from "../lib/accessScopes.js";
 import {
   fetchCandidates,
   fetchOrderDetails,
+  getOldestVisibleOrderCreatedAt,
   getShopTimezone,
   candidateMatches,
   hasFulfillmentOrderDetailScopes,
@@ -150,8 +151,9 @@ function visibilityIndeterminateError(
   since: string,
   until: string,
   tz: string,
+  nowMs: number,
 ): ScopeHorizonError {
-  const info = horizonInfo(scopes, undefined, tz);
+  const info = horizonInfo(scopes, nowMs, tz);
   const err = new ScopeHorizonError({
     missing: READ_ALL_ORDERS,
     horizon: info.horizon,
@@ -189,6 +191,7 @@ const getProductOrderHistory = {
     deps?: OrderHistoryFetchDeps,
   ) => {
     try {
+      const nowMs = Date.now();
       const parsed = GetProductOrderHistoryInputSchema.parse(input);
       const {
         skus,
@@ -206,7 +209,7 @@ const getProductOrderHistory = {
       const scopes = await getAccessScopes(shopifyClient);
       const tz = await getShopTimezone(shopifyClient);
       const window = buildShopWindow(since, until, tz);
-      const asOf = new Date().toISOString();
+      const asOf = new Date(nowMs).toISOString();
 
       let completeness: {
         status: "complete" | "partial";
@@ -221,13 +224,14 @@ const getProductOrderHistory = {
             scopes,
             sinceIso: window.startIso,
             untilIso: window.endIso,
+            nowMs,
             tz,
             requestedSince: since,
             requestedUntil: until,
           });
-          throw visibilityIndeterminateError(scopes, since, until, tz);
+          throw visibilityIndeterminateError(scopes, since, until, tz, nowMs);
         }
-        completeness = completenessInfo(scopes);
+        completeness = completenessInfo(scopes, nowMs);
         const visibleFrom = completeness.visible_from ?? "the 60-day horizon";
         leadWarnings.push(
           `INCOMPLETE: read_all_orders missing; orders created before ${visibleFrom} are invisible; counts are partial and must not be used as historical acceptance`,
@@ -277,7 +281,14 @@ const getProductOrderHistory = {
       });
 
       const warnings = leadWarnings.concat(result.warnings);
-      const horizon = horizonInfo(scopes, undefined, tz);
+      const oldestVisible = await getOldestVisibleOrderCreatedAt(
+        shopifyClient,
+        { nowMs },
+      );
+      const horizon = {
+        ...horizonInfo(scopes, nowMs, tz),
+        oldest_visible_order_created_at: oldestVisible,
+      };
 
       const response: Record<string, unknown> = {
         store: process.env.MYSHOPIFY_DOMAIN ?? "",

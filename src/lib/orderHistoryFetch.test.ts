@@ -7,6 +7,10 @@ import type { GraphQLClient } from "graphql-request";
 
 import { SCOPE_CACHE_TTL_MS, _resetForTest as resetScopes } from "./accessScopes.js";
 import {
+  _getLastActivityMs,
+  _resetForTest as resetWatchdog,
+} from "./lifecycleWatchdog.js";
+import {
   DETAILS_BATCH_SIZE,
   DETAILS_CHUNK_SIZES,
   FO_DETAIL_SCOPES,
@@ -25,6 +29,7 @@ import {
   escapeBulkFilter,
   fetchCandidates,
   fetchOrderDetails,
+  getOldestVisibleOrderCreatedAt,
   getShopTimezone,
   mapDetailNodeToRawOrder,
   readThrottleExtensions,
@@ -40,6 +45,7 @@ import { shopDayStartOffsetIso, nextDay } from "./shopTime.js";
 afterEach(() => {
   _resetForTest();
   resetScopes();
+  resetWatchdog();
 });
 
 const CHICAGO = "America/Chicago";
@@ -309,6 +315,70 @@ describe("getShopTimezone", () => {
   });
 });
 
+describe("getOldestVisibleOrderCreatedAt", () => {
+  test("queries OldestVisibleOrder, caches per client within TTL, null when empty", async () => {
+    const a = fakeClient();
+    const b = fakeClient();
+    a.request.mockResolvedValue({
+      orders: { edges: [{ node: { createdAt: "2026-07-10T12:00:00Z" } }] },
+    });
+    b.request.mockResolvedValue({ orders: { edges: [] } });
+    const t0 = 1_000_000;
+    await expect(
+      getOldestVisibleOrderCreatedAt(a.client, { nowMs: t0 }),
+    ).resolves.toBe("2026-07-10T12:00:00Z");
+    await expect(
+      getOldestVisibleOrderCreatedAt(a.client, {
+        nowMs: t0 + SCOPE_CACHE_TTL_MS - 1,
+      }),
+    ).resolves.toBe("2026-07-10T12:00:00Z");
+    expect(a.request).toHaveBeenCalledTimes(1);
+    expect(String(a.request.mock.calls[0][0])).toMatch(/OldestVisibleOrder/);
+    expect(String(a.request.mock.calls[0][0])).toMatch(
+      /sortKey:\s*CREATED_AT/,
+    );
+    await expect(
+      getOldestVisibleOrderCreatedAt(b.client, { nowMs: t0 }),
+    ).resolves.toBeNull();
+    expect(b.request).toHaveBeenCalledTimes(1);
+    await expect(
+      getOldestVisibleOrderCreatedAt(a.client, {
+        nowMs: t0 + SCOPE_CACHE_TTL_MS,
+      }),
+    ).resolves.toBe("2026-07-10T12:00:00Z");
+    expect(a.request).toHaveBeenCalledTimes(2);
+  });
+
+  test("force bypasses cache; errors propagate and are not cached", async () => {
+    const { client, request } = fakeClient();
+    request
+      .mockResolvedValueOnce({
+        orders: { edges: [{ node: { createdAt: "2026-01-01T00:00:00Z" } }] },
+      })
+      .mockResolvedValueOnce({
+        orders: { edges: [{ node: { createdAt: "2026-02-01T00:00:00Z" } }] },
+      });
+    const t0 = 1_000_000;
+    await getOldestVisibleOrderCreatedAt(client, { nowMs: t0 });
+    await expect(
+      getOldestVisibleOrderCreatedAt(client, { nowMs: t0 + 1, force: true }),
+    ).resolves.toBe("2026-02-01T00:00:00Z");
+    expect(request).toHaveBeenCalledTimes(2);
+
+    const failing = fakeClient();
+    failing.request.mockRejectedValue(new Error("boom"));
+    await expect(getOldestVisibleOrderCreatedAt(failing.client)).rejects.toThrow(
+      /boom/,
+    );
+    failing.request.mockResolvedValue({
+      orders: { edges: [{ node: { createdAt: "2026-07-10T12:00:00Z" } }] },
+    });
+    await expect(getOldestVisibleOrderCreatedAt(failing.client)).resolves.toBe(
+      "2026-07-10T12:00:00Z",
+    );
+  });
+});
+
 describe("fetchCandidates cursor", () => {
   test("paginates two order pages and continues lineItems", async () => {
     const { client, rawRequest } = fakeClient();
@@ -372,6 +442,62 @@ describe("fetchCandidates cursor", () => {
     expect(result.requests).toBe(3);
     expect(result.query).toContain("created_at:<");
     expect(ORDER_HISTORY_CANDIDATES_QUERY).toMatch(/OrderHistoryCandidates/);
+  });
+
+  test("bumpActivity advances across a 3-page candidate scan", async () => {
+    resetWatchdog();
+    const before = _getLastActivityMs();
+    const { client, rawRequest } = fakeClient();
+    const sleeper = recordingSleep();
+    const samples: number[] = [];
+    rawRequest.mockImplementation(async (query: unknown, variables?: unknown) => {
+      const name = opName(query);
+      if (name !== "OrderHistoryCandidates") {
+        throw new Error(`unexpected operation ${name}`);
+      }
+      await new Promise((r) => setTimeout(r, 8));
+      samples.push(_getLastActivityMs());
+      const vars = variables as { after?: string } | undefined;
+      if (!vars?.after) {
+        return rawOk({
+          orders: {
+            edges: [
+              { node: candidateNode("gid://shopify/Order/1", "#1", "AAA") },
+            ],
+            pageInfo: { hasNextPage: true, endCursor: "page-2" },
+          },
+        });
+      }
+      if (vars.after === "page-2") {
+        return rawOk({
+          orders: {
+            edges: [
+              { node: candidateNode("gid://shopify/Order/2", "#2", "BBB") },
+            ],
+            pageInfo: { hasNextPage: true, endCursor: "page-3" },
+          },
+        });
+      }
+      return rawOk({
+        orders: {
+          edges: [
+            { node: candidateNode("gid://shopify/Order/3", "#3", "CCC") },
+          ],
+          pageInfo: { hasNextPage: false, endCursor: null },
+        },
+      });
+    });
+
+    const result = await fetchCandidates(
+      client,
+      { since: "2026-07-05", until: "2026-07-10", tz: CHICAGO },
+      { sleep: sleeper.sleep },
+    );
+    expect(result.orders).toHaveLength(3);
+    expect(samples).toHaveLength(3);
+    expect(samples[0]).toBeGreaterThan(before);
+    expect(samples[1]).toBeGreaterThan(samples[0]);
+    expect(samples[2]).toBeGreaterThan(samples[1]);
   });
 
   test("uses bulk when forceBulk or span > 90 days", async () => {
@@ -972,6 +1098,77 @@ describe("mapDetailNodeToRawOrder", () => {
     expect(raw.returns).toBeNull();
     expect(raw.fulfillmentOrders).toBeNull();
     expect(raw.sourceName).toBeNull();
+  });
+
+  test("keeps unmappable return lines as lineItemId null instead of dropping them", () => {
+    const candidate: CandidateOrder = {
+      id: "gid://shopify/Order/1",
+      name: "#1",
+      createdAt: "2026-07-27T03:40:26Z",
+      cancelledAt: null,
+      sourceName: "web",
+      test: false,
+      tags: [],
+      lineItems: [
+        {
+          id: "gid://shopify/LineItem/1",
+          sku: "7711-P",
+          quantity: 1,
+          currentQuantity: 1,
+          unfulfilledQuantity: 0,
+        },
+      ],
+      fulfillments: [],
+      refunds: [],
+    };
+    const raw = mapDetailNodeToRawOrder(
+      candidate,
+      {
+        id: candidate.id,
+        fulfillments: [],
+        refunds: [],
+        returns: {
+          edges: [
+            {
+              node: {
+                id: "gid://shopify/Return/1",
+                status: "CLOSED",
+                createdAt: "2026-08-02T00:00:00Z",
+                returnLineItems: {
+                  edges: [
+                    {
+                      node: {
+                        quantity: 2,
+                        fulfillmentLineItem: null,
+                      },
+                    },
+                    {
+                      node: {
+                        quantity: 1,
+                        fulfillmentLineItem: { lineItem: { id: "gid://shopify/LineItem/1" } },
+                      },
+                    },
+                    {
+                      node: {
+                        quantity: 3,
+                        fulfillmentLineItem: { lineItem: null },
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          ],
+        },
+      },
+      { includeReturns: true, includeFulfillmentOrders: false },
+    );
+    expect(raw.returns).toHaveLength(1);
+    expect(raw.returns?.[0].lineItems).toEqual([
+      { quantity: 2, lineItemId: null },
+      { quantity: 1, lineItemId: "gid://shopify/LineItem/1" },
+      { quantity: 3, lineItemId: null },
+    ]);
   });
 });
 

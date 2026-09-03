@@ -281,6 +281,7 @@ describe("countUnits empty input", () => {
     );
     expect(result.totals.units_returned).toBeNull();
     expect(result.reconciliation.returns_in_progress).toBeNull();
+    expect(result.reconciliation.returns_unattributed).toBeNull();
     expect(result.reconciliation.refunded_without_return).toBeNull();
     expect(result.reconciliation.returned_without_refund).toBeNull();
     expect(result.warnings).toContain(
@@ -292,6 +293,7 @@ describe("countUnits empty input", () => {
     const result = countUnits([], makeParams({ returnsScopeComplete: true }));
     expect(result.totals.units_returned).toBe(0);
     expect(result.reconciliation.returns_in_progress).toBe(0);
+    expect(result.reconciliation.returns_unattributed).toBe(0);
     expect(
       result.warnings.some((w) => w.includes("read_returns scope missing")),
     ).toBe(false);
@@ -625,6 +627,7 @@ describe("returns", () => {
     const result = countUnits([order], makeParams());
     expect(result.totals.units_returned).toBeNull();
     expect(result.reconciliation.returns_in_progress).toBeNull();
+    expect(result.reconciliation.returns_unattributed).toBeNull();
     expect(result.reconciliation.refunded_without_return).toBeNull();
     expect(result.reconciliation.returned_without_refund).toBeNull();
     expect(result.warnings).toContain(
@@ -661,6 +664,74 @@ describe("returns", () => {
     const result = countUnits([order], makeParams());
     expect(result.totals.units_returned).toBe(2);
     expect(result.reconciliation.returns_in_progress).toBe(7);
+    expect(result.reconciliation.returns_unattributed).toBe(5);
+    expect(result.warnings).toContain(
+      "Return null-li: 1 line(s) could not be mapped to a line item; units_returned is understated",
+    );
+  });
+
+  test("OPEN unmappable lines count in returns_unattributed; CLOSED out-of-window unmappable do not", () => {
+    const order = makeOrder({
+      returns: [
+        makeReturn({
+          id: "open-null",
+          status: "OPEN",
+          createdAt: "2024-01-01T12:00:00Z",
+          lineItems: [
+            { quantity: 3, lineItemId: null },
+            { quantity: 1, lineItemId: LINE_A },
+          ],
+        }),
+        makeReturn({
+          id: "closed-out-null",
+          status: "CLOSED",
+          createdAt: "2024-01-01T12:00:00Z",
+          lineItems: [{ quantity: 9, lineItemId: null }],
+        }),
+        makeReturn({
+          id: "declined-null",
+          status: "DECLINED",
+          createdAt: "2025-03-06T12:00:00Z",
+          lineItems: [{ quantity: 4, lineItemId: null }],
+        }),
+      ],
+    });
+    const result = countUnits([order], makeParams());
+    expect(result.totals.units_returned).toBe(0);
+    expect(result.reconciliation.returns_in_progress).toBe(1);
+    expect(result.reconciliation.returns_unattributed).toBe(3);
+    expect(result.warnings).toContain(
+      "Return open-null: 1 line(s) could not be mapped to a line item; units_returned is understated",
+    );
+    expect(
+      result.warnings.some((w) => w.includes("closed-out-null")),
+    ).toBe(false);
+    expect(
+      result.warnings.some((w) => w.includes("declined-null")),
+    ).toBe(false);
+  });
+
+  test("two unmappable lines on one in-window CLOSED return warn with n=2", () => {
+    const order = makeOrder({
+      returns: [
+        makeReturn({
+          id: "gid://shopify/Return/mix",
+          status: "CLOSED",
+          createdAt: "2025-03-06T12:00:00Z",
+          lineItems: [
+            { quantity: 2, lineItemId: null },
+            { quantity: 1, lineItemId: LINE_A },
+            { quantity: 3, lineItemId: null },
+          ],
+        }),
+      ],
+    });
+    const result = countUnits([order], makeParams());
+    expect(result.totals.units_returned).toBe(1);
+    expect(result.reconciliation.returns_unattributed).toBe(5);
+    expect(result.warnings).toContain(
+      "Return gid://shopify/Return/mix: 2 line(s) could not be mapped to a line item; units_returned is understated",
+    );
   });
 
   test("refunded_without_return and returned_without_refund", () => {
@@ -1293,7 +1364,8 @@ describe("null fulfillment line quantity", () => {
     expect(
       result.warnings.some((w) => w.includes(fid) && /null/i.test(w)),
     ).toBe(true);
-    expect(result.orders_evidence[0].shipped).toBe(2);
+    expect(result.orders_evidence[0].shipped_all_time).toBe(2);
+    expect(result.orders_evidence[0].shipped_in_window).toBe(2);
   });
 
   test("two SUCCESS fulfillments on the same instant still ship both quantities", () => {
@@ -1342,7 +1414,8 @@ describe("evidence cap", () => {
     expect(result.totals.orders).toBe(3);
     expect(result.orders_evidence[0].created_at).toBe("2025-01-11T12:00:00Z");
     expect(result.orders_evidence[1].created_at).toBe("2025-01-12T12:00:00Z");
-    expect(result.orders_evidence[0].refunded_amount).toBe(0);
+    expect(result.orders_evidence[0].refunded_amount_all_time).toBe(0);
+    expect(result.orders_evidence[0].refunded_amount_in_window).toBe(0);
   });
 
   test("same createdAt sorts evidence by id; returned is null when returns are null", () => {
@@ -1363,7 +1436,8 @@ describe("evidence cap", () => {
       "gid://shopify/Order/a",
       "gid://shopify/Order/b",
     ]);
-    expect(result.orders_evidence[0].returned).toBeNull();
+    expect(result.orders_evidence[0].returned_all_time).toBeNull();
+    expect(result.orders_evidence[0].returned_in_window).toBeNull();
   });
 
   test("default cap 500 does not truncate 3 orders; evidence includes refunded_amount", () => {
@@ -1379,10 +1453,118 @@ describe("evidence cap", () => {
     const result = countUnits([order], makeParams());
     expect(result.orders_truncated).toBe(false);
     expect(result.orders_evidence).toHaveLength(1);
-    expect(result.orders_evidence[0].refunded_amount).toBe(12.34);
-    expect(result.orders_evidence[0].refunded).toBe(1);
-    expect(result.orders_evidence[0].returned).toBe(0);
+    expect(result.orders_evidence[0].refunded_amount_all_time).toBe(12.34);
+    expect(result.orders_evidence[0].refunded_amount_in_window).toBe(12.34);
+    expect(result.orders_evidence[0].refunded_all_time).toBe(1);
+    expect(result.orders_evidence[0].refunded_in_window).toBe(1);
+    expect(result.orders_evidence[0].returned_all_time).toBe(0);
+    expect(result.orders_evidence[0].returned_in_window).toBe(0);
     expect(result.orders_evidence[0].created_shop_date).toBe("2025-01-15");
+  });
+
+  test("sum of in-window evidence equals shipped_gross / units_refunded / refunded_amount", () => {
+    const cancelledShipped = makeOrder({
+      id: "gid://shopify/Order/adj",
+      name: "#adj",
+      createdAt: "2025-01-15T12:00:00Z",
+      cancelledAt: "2025-06-01T12:00:00Z",
+      fulfillments: [
+        makeFulfillment({
+          id: "in-win",
+          createdAt: "2025-02-10T12:00:00Z",
+          lineItems: [{ quantity: 3, lineItemId: LINE_A }],
+        }),
+        makeFulfillment({
+          id: "out-win",
+          createdAt: "2024-06-01T12:00:00Z",
+          lineItems: [{ quantity: 2, lineItemId: LINE_A }],
+        }),
+      ],
+      refunds: [
+        makeRefund({
+          id: "refund-in",
+          createdAt: "2025-03-05T12:00:00Z",
+          lineItems: [
+            { quantity: 1, restockType: "RETURN", lineItemId: LINE_A, subtotalAmount: 10 },
+          ],
+        }),
+        makeRefund({
+          id: "refund-out",
+          createdAt: "2024-07-01T12:00:00Z",
+          lineItems: [
+            { quantity: 4, restockType: "RETURN", lineItemId: LINE_A, subtotalAmount: 40 },
+          ],
+        }),
+      ],
+      returns: [
+        makeReturn({
+          id: "ret-in",
+          status: "CLOSED",
+          createdAt: "2025-03-06T12:00:00Z",
+          lineItems: [{ quantity: 1, lineItemId: LINE_A }],
+        }),
+        makeReturn({
+          id: "ret-out",
+          status: "CLOSED",
+          createdAt: "2024-08-01T12:00:00Z",
+          lineItems: [{ quantity: 2, lineItemId: LINE_A }],
+        }),
+      ],
+    });
+    const liveShipped = makeOrder({
+      id: "gid://shopify/Order/live",
+      name: "#live",
+      createdAt: "2025-01-16T12:00:00Z",
+      fulfillments: [
+        makeFulfillment({
+          id: "live-in",
+          createdAt: "2025-02-11T12:00:00Z",
+          lineItems: [{ quantity: 2, lineItemId: LINE_A }],
+        }),
+      ],
+      refunds: [
+        makeRefund({
+          id: "live-refund",
+          createdAt: "2025-04-01T12:00:00Z",
+          lineItems: [
+            { quantity: 1, restockType: "CANCEL", lineItemId: LINE_A, subtotalAmount: 7.5 },
+          ],
+        }),
+      ],
+    });
+    const result = countUnits(
+      [cancelledShipped, liveShipped],
+      makeParams(),
+    );
+    const shippedIn = result.orders_evidence.reduce(
+      (sum, row) => sum + row.shipped_in_window,
+      0,
+    );
+    const refundedIn = result.orders_evidence.reduce(
+      (sum, row) => sum + row.refunded_in_window,
+      0,
+    );
+    const refundedAmtIn = result.orders_evidence.reduce(
+      (sum, row) => sum + row.refunded_amount_in_window,
+      0,
+    );
+    expect(result.reconciliation.shipped_gross).toBe(5);
+    expect(result.totals.units_shipped).toBe(2);
+    expect(shippedIn).toBe(result.reconciliation.shipped_gross);
+    expect(shippedIn).not.toBe(result.totals.units_shipped);
+    expect(refundedIn).toBe(result.totals.units_refunded);
+    expect(refundedAmtIn).toBe(result.totals.refunded_amount);
+    expect(result.orders_evidence[0].shipped_all_time).toBe(5);
+    expect(result.orders_evidence[0].shipped_in_window).toBe(3);
+    expect(result.orders_evidence[0].refunded_all_time).toBe(5);
+    expect(result.orders_evidence[0].refunded_in_window).toBe(1);
+    expect(result.orders_evidence[0].refunded_amount_all_time).toBe(50);
+    expect(result.orders_evidence[0].refunded_amount_in_window).toBe(10);
+    expect(result.orders_evidence[0].returned_all_time).toBe(3);
+    expect(result.orders_evidence[0].returned_in_window).toBe(1);
+    expect(result.orders_evidence[1].shipped_in_window).toBe(2);
+    expect(result.orders_evidence[1].refunded_in_window).toBe(1);
+    expect(result.orders_evidence[1].refunded_amount_in_window).toBe(7.5);
   });
 });
 

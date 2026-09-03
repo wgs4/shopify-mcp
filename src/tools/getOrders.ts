@@ -3,7 +3,10 @@ import { gql } from "graphql-request";
 import { z } from "zod";
 import { getAccessScopes } from "../lib/accessScopes.js";
 import { formatOrderSummary } from "../lib/formatters.js";
-import { getShopTimezone } from "../lib/orderHistoryFetch.js";
+import {
+  getOldestVisibleOrderCreatedAt,
+  getShopTimezone,
+} from "../lib/orderHistoryFetch.js";
 import { guardOrderQuery } from "../lib/orderWall.js";
 import { handleToolError, edgesToNodes, type ShopifyConnection } from "../lib/toolUtils.js";
 
@@ -60,6 +63,8 @@ const getOrders = {
       const scopes = await getAccessScopes(shopifyClient);
       const tz = await getShopTimezone(shopifyClient);
       const horizon = guardOrderQuery({ scopes, query: queryFilter, tz });
+      horizon.oldest_visible_order_created_at =
+        await getOldestVisibleOrderCreatedAt(shopifyClient);
 
       const query = gql`
         #graphql

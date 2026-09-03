@@ -54,6 +54,7 @@ import {
   isAccessDeniedError,
   missingScopeError,
 } from "./accessScopes.js";
+import { bumpActivity } from "./lifecycleWatchdog.js";
 import {
   attachChildren,
   runBulkQuery,
@@ -149,9 +150,36 @@ interface TimezoneCacheEntry {
 
 let timezoneCache = new WeakMap<GraphQLClient, TimezoneCacheEntry>();
 
+const OLDEST_VISIBLE_ORDER_QUERY = gql`
+  #graphql
+  query OldestVisibleOrder {
+    orders(first: 1, sortKey: CREATED_AT) {
+      edges {
+        node {
+          createdAt
+        }
+      }
+    }
+  }
+`;
+
+interface OldestVisibleOrderQueryResult {
+  orders?: {
+    edges?: Array<{ node?: { createdAt?: unknown } | null } | null> | null;
+  } | null;
+}
+
+interface OldestVisibleCacheEntry {
+  createdAt: string | null;
+  fetchedAt: number;
+}
+
+let oldestVisibleCache = new WeakMap<GraphQLClient, OldestVisibleCacheEntry>();
+
 /** Test hook: drop every cached client. */
 export function _resetForTest(): void {
   timezoneCache = new WeakMap();
+  oldestVisibleCache = new WeakMap();
 }
 
 export function invalidateShopTimezone(client: GraphQLClient): void {
@@ -181,6 +209,32 @@ export async function getShopTimezone(
   }
   timezoneCache.set(client, { tz, fetchedAt: nowMs });
   return tz;
+}
+
+/**
+ * Oldest order this token can see (`orders(first: 1, sortKey: CREATED_AT)`).
+ * Memoized per GraphQLClient with the same 10-minute TTL as getShopTimezone.
+ * Returns null when the store has no visible orders. Errors propagate.
+ */
+export async function getOldestVisibleOrderCreatedAt(
+  client: GraphQLClient,
+  opts?: { force?: boolean; nowMs?: number },
+): Promise<string | null> {
+  const nowMs = opts?.nowMs ?? Date.now();
+  if (!opts?.force) {
+    const hit = oldestVisibleCache.get(client);
+    if (hit && nowMs - hit.fetchedAt < SCOPE_CACHE_TTL_MS) {
+      return hit.createdAt;
+    }
+  }
+  const data = await client.request<OldestVisibleOrderQueryResult>(
+    OLDEST_VISIBLE_ORDER_QUERY,
+  );
+  const createdAt = data?.orders?.edges?.[0]?.node?.createdAt;
+  const value =
+    typeof createdAt === "string" && createdAt.length > 0 ? createdAt : null;
+  oldestVisibleCache.set(client, { createdAt: value, fetchedAt: nowMs });
+  return value;
 }
 
 // ── Filter / bulk-vs-cursor selection ───────────────────────────────────
@@ -369,6 +423,10 @@ async function throttledRawRequest<T>(
   sleep: (ms: number) => Promise<void>,
 ): Promise<T> {
   let retries = 0;
+  const sleepWithBump = async (ms: number): Promise<void> => {
+    bumpActivity();
+    await sleep(ms);
+  };
   while (true) {
     const delay = throttleDelayMs(
       gate.currentlyAvailable,
@@ -376,12 +434,13 @@ async function throttledRawRequest<T>(
       gate.restoreRate,
     );
     if (delay > 0) {
-      await sleep(delay);
+      await sleepWithBump(delay);
     }
 
     let result: RawRequestResult<T>;
     try {
       result = await withTransientRetry(async () => {
+        bumpActivity();
         try {
           const once = (await client.rawRequest(
             query,
@@ -396,7 +455,7 @@ async function throttledRawRequest<T>(
       }, {
         attempts: 3,
         delaysMs: [...TRANSIENT_RETRY_DELAYS_MS],
-        sleep,
+        sleep: sleepWithBump,
       });
     } catch (err) {
       if (isMissingScopeError(err)) {
@@ -405,7 +464,7 @@ async function throttledRawRequest<T>(
       throwIfAccessDenied(err);
       const message = err instanceof Error ? err.message : String(err);
       if (message.includes("Throttled") && retries < 3) {
-        await sleep(THROTTLE_RETRY_BACKOFF_MS[retries]);
+        await sleepWithBump(THROTTLE_RETRY_BACKOFF_MS[retries]);
         retries += 1;
         continue;
       }
@@ -423,7 +482,7 @@ async function throttledRawRequest<T>(
         response: { errors: result.errors },
       });
       if (message.includes("Throttled") && retries < 3) {
-        await sleep(THROTTLE_RETRY_BACKOFF_MS[retries]);
+        await sleepWithBump(THROTTLE_RETRY_BACKOFF_MS[retries]);
         retries += 1;
         continue;
       }

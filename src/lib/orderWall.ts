@@ -81,6 +81,7 @@ export interface HorizonInfo {
   horizon_shop_date: string | null;
   first_visible_date: string;
   scope_missing: "read_all_orders" | null;
+  oldest_visible_order_created_at?: string | null;
 }
 
 export interface Completeness {

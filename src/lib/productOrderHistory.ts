@@ -183,6 +183,7 @@ export interface Reconciliation {
   refunded_by_restock_type: Record<string, number>;
   refunds_unattributed: number;
   refunded_amount_unattributed: number;
+  returns_unattributed: number | null;
   returns_in_progress: number | null;
   refunded_without_return: number | null;
   returned_without_refund: number | null;
@@ -214,10 +215,14 @@ export interface OrderEvidence {
     current_quantity: number;
     unfulfilled_quantity: number;
   }>;
-  shipped: number;
-  refunded: number;
-  returned: number | null;
-  refunded_amount: number;
+  shipped_all_time: number;
+  shipped_in_window: number;
+  refunded_all_time: number;
+  refunded_in_window: number;
+  refunded_amount_all_time: number;
+  refunded_amount_in_window: number;
+  returned_all_time: number | null;
+  returned_in_window: number | null;
 }
 
 export interface CountResult {
@@ -351,10 +356,15 @@ function refundedUnitsAllTime(order: RawOrder, matchingIds: Set<string>): number
   return qty;
 }
 
-function evidenceShipped(order: RawOrder, matchingIds: Set<string>): number {
+function evidenceShipped(
+  order: RawOrder,
+  matchingIds: Set<string>,
+  inWindow?: (iso: string | null | undefined) => boolean,
+): number {
   let qty = 0;
   for (const f of order.fulfillments) {
     if (f.status !== "SUCCESS") continue;
+    if (inWindow && !inWindow(f.createdAt)) continue;
     for (const li of f.lineItems) {
       if (!matchingIds.has(li.lineItemId)) continue;
       if (li.quantity === null) continue;
@@ -364,13 +374,18 @@ function evidenceShipped(order: RawOrder, matchingIds: Set<string>): number {
   return qty;
 }
 
-function evidenceRefunded(order: RawOrder, matchingIds: Set<string>): {
+function evidenceRefunded(
+  order: RawOrder,
+  matchingIds: Set<string>,
+  inWindow?: (iso: string | null | undefined) => boolean,
+): {
   qty: number;
   amount: number;
 } {
   let qty = 0;
   let amount = 0;
   for (const refund of order.refunds) {
+    if (inWindow && !inWindow(refund.createdAt)) continue;
     for (const li of refund.lineItems) {
       if (!matchingIds.has(li.lineItemId)) continue;
       qty += li.quantity;
@@ -380,11 +395,16 @@ function evidenceRefunded(order: RawOrder, matchingIds: Set<string>): {
   return { qty, amount: round2(amount) };
 }
 
-function evidenceReturned(order: RawOrder, matchingIds: Set<string>): number | null {
+function evidenceReturned(
+  order: RawOrder,
+  matchingIds: Set<string>,
+  inWindow?: (iso: string | null | undefined) => boolean,
+): number | null {
   if (order.returns === null) return null;
   let qty = 0;
   for (const ret of order.returns) {
     if (ret.status !== "CLOSED") continue;
+    if (inWindow && !inWindow(ret.createdAt)) continue;
     for (const li of ret.lineItems) {
       if (li.lineItemId !== null && matchingIds.has(li.lineItemId)) {
         qty += li.quantity;
@@ -400,7 +420,12 @@ function toEvidence(
   matching: RawLineItem[],
   matchingIds: Set<string>,
 ): OrderEvidence {
-  const refunded = evidenceRefunded(order, matchingIds);
+  const refundedAll = evidenceRefunded(order, matchingIds);
+  const refundedWindow = evidenceRefunded(
+    order,
+    matchingIds,
+    params.time.inWindow,
+  );
   return {
     id: order.id,
     name: order.name,
@@ -416,10 +441,22 @@ function toEvidence(
       current_quantity: line.currentQuantity,
       unfulfilled_quantity: line.unfulfilledQuantity,
     })),
-    shipped: evidenceShipped(order, matchingIds),
-    refunded: refunded.qty,
-    returned: evidenceReturned(order, matchingIds),
-    refunded_amount: refunded.amount,
+    shipped_all_time: evidenceShipped(order, matchingIds),
+    shipped_in_window: evidenceShipped(
+      order,
+      matchingIds,
+      params.time.inWindow,
+    ),
+    refunded_all_time: refundedAll.qty,
+    refunded_in_window: refundedWindow.qty,
+    refunded_amount_all_time: refundedAll.amount,
+    refunded_amount_in_window: refundedWindow.amount,
+    returned_all_time: evidenceReturned(order, matchingIds),
+    returned_in_window: evidenceReturned(
+      order,
+      matchingIds,
+      params.time.inWindow,
+    ),
   };
 }
 
@@ -651,6 +688,7 @@ export function countUnits(orders: RawOrder[], params: CountParams): CountResult
   let refundsUnattributed = 0;
   let refundedAmountUnattributed = 0;
   let returnsInProgress = 0;
+  let returnsUnattributed = 0;
   let undatedRefunds = 0;
   let foRemaining = 0;
 
@@ -786,18 +824,40 @@ export function countUnits(orders: RawOrder[], params: CountParams): CountResult
 
     if (!returnsMissing && order.returns !== null) {
       for (const ret of order.returns) {
+        const inProgress =
+          ret.status === "OPEN" || ret.status === "REQUESTED";
+        const closedInWindow =
+          ret.status === "CLOSED" && time.inWindow(ret.createdAt);
+        const dated = ret.createdAt != null && ret.createdAt !== "";
+        const otherwiseCounted = dated && (closedInWindow || inProgress);
+
         let matchingQty = 0;
+        let unmappedQty = 0;
+        let unmappedLines = 0;
         for (const li of ret.lineItems) {
-          if (li.lineItemId !== null && matchingIdSet.has(li.lineItemId)) {
+          if (li.lineItemId === null) {
+            if (otherwiseCounted) {
+              unmappedQty += li.quantity;
+              unmappedLines += 1;
+            }
+            continue;
+          }
+          if (matchingIdSet.has(li.lineItemId)) {
             matchingQty += li.quantity;
           }
+        }
+        if (unmappedLines > 0) {
+          returnsUnattributed += unmappedQty;
+          warnings.push(
+            `Return ${ret.id}: ${unmappedLines} line(s) could not be mapped to a line item; units_returned is understated`,
+          );
         }
         if (matchingQty === 0) continue;
         if (ret.status === "CLOSED") {
           if (time.inWindow(ret.createdAt)) {
             add("units_returned", matchingQty, ret.createdAt);
           }
-        } else if (ret.status === "OPEN" || ret.status === "REQUESTED") {
+        } else if (inProgress) {
           returnsInProgress += matchingQty;
         }
       }
@@ -870,6 +930,7 @@ export function countUnits(orders: RawOrder[], params: CountParams): CountResult
     refunded_by_restock_type: refundedByRestock,
     refunds_unattributed: refundsUnattributed,
     refunded_amount_unattributed: round2(refundedAmountUnattributed),
+    returns_unattributed: returnsMissing ? null : returnsUnattributed,
     returns_in_progress: returnsMissing ? null : returnsInProgress,
     refunded_without_return: refundedWithoutReturn,
     returned_without_refund: returnedWithoutRefund,
