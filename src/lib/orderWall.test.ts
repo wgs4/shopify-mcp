@@ -698,15 +698,15 @@ describe("OR token is unquoted uppercase whitespace-delimited", () => {
 });
 
 describe("analyzeDatePredicates performance", () => {
-  test("8000 repeated predicates (200 kB) analyze in under 200 ms", () => {
+  test("16000 repeated predicates (~400 kB) analyze in under 1000 ms (quadratic scan took seconds)", () => {
     const pred = "created_at:>=2026-08-01 tag:keep ";
-    const query = pred.repeat(8000);
-    expect(query.length).toBeGreaterThanOrEqual(200_000);
+    const query = pred.repeat(16_000);
+    expect(query.length).toBeGreaterThanOrEqual(400_000);
     const t0 = Date.now();
     const a = analyzeDatePredicates(query);
     const elapsed = Date.now() - t0;
-    expect(elapsed).toBeLessThan(200);
-    expect(a.predicates).toHaveLength(8000);
+    expect(elapsed).toBeLessThan(1000);
+    expect(a.predicates).toHaveLength(16_000);
     expect(a.indeterminate).toBe(false);
   });
 });

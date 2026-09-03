@@ -46,9 +46,13 @@
  *              |
  *              v
  *   [3 download]
- *        +-- url null -> rows []
+ *        +-- objectCount > 0 and url null/empty -> throw INCONSISTENT
+ *            (never treat a non-empty operation as rows [])
+ *        +-- objectCount 0, url null -> rows []
  *        +-- url -> fetchImpl (network / non-2xx retry once after 1s)
- *                   then parseJsonl
+ *                   stream JSONL from response.body (TextDecoder stream:true);
+ *                   body null/absent -> response.text() then parseJsonl
+ *                   parsed row count !== objectCount -> throw INCONSISTENT
  *
  * JSONL grouping: root objects have no `__parentId`; nested-connection
  * children carry `__parentId` equal to the parent id. List fields
@@ -122,7 +126,8 @@ export type BulkOperationErrorCode =
   | "ACCESS_DENIED"
   | "TOO_MANY_OBJECTS"
   | "DOWNLOAD_FAILED"
-  | "DEADLINE";
+  | "DEADLINE"
+  | "INCONSISTENT";
 
 export class BulkOperationError extends Error {
   name = "BulkOperationError";
@@ -521,18 +526,18 @@ async function pollUntilDone(
 
 // ── Download ────────────────────────────────────────────────────────────
 
-async function downloadJsonl(
+async function downloadJsonlResponse(
   url: string,
   fetchImpl: typeof fetch,
   sleep: (ms: number) => Promise<void>,
   bulkOperationId: string,
-): Promise<string> {
-  const once = async (): Promise<string> => {
+): Promise<Response> {
+  const once = async (): Promise<Response> => {
     const response = await fetchImpl(url);
     if (!response.ok) {
       throw new Error(`HTTP ${response.status} downloading bulk results`);
     }
-    return await response.text();
+    return response;
   };
 
   try {
@@ -551,6 +556,16 @@ async function downloadJsonl(
       );
     }
   }
+}
+
+async function rowsFromResponse(
+  response: Response,
+): Promise<Record<string, unknown>[]> {
+  const body = response.body;
+  if (body == null) {
+    return parseJsonl(await response.text());
+  }
+  return parseJsonlStream(body);
 }
 
 // ── Public runner ───────────────────────────────────────────────────────
@@ -584,15 +599,38 @@ export async function runBulkQuery(
     }
 
     const node = end.node;
-    let rows: Record<string, unknown>[] = [];
-    if (node.url) {
-      const text = await downloadJsonl(
-        node.url,
-        options.fetchImpl,
-        options.sleep,
+    if (!node.url) {
+      if (node.objectCount > 0) {
+        throw new BulkOperationError(
+          "INCONSISTENT",
+          `Bulk operation ${node.id} completed with ${node.objectCount} objects but no result URL; refusing to treat it as empty`,
+          node.id,
+        );
+      }
+      return {
+        id: node.id,
+        objectCount: node.objectCount,
+        rootObjectCount: node.rootObjectCount,
+        rows: [],
+        url: node.url,
+        elapsedMs: options.now() - startedAt,
+        polls,
+      };
+    }
+
+    const response = await downloadJsonlResponse(
+      node.url,
+      options.fetchImpl,
+      options.sleep,
+      node.id,
+    );
+    const rows = await rowsFromResponse(response);
+    if (rows.length !== node.objectCount) {
+      throw new BulkOperationError(
+        "INCONSISTENT",
+        `parsed ${rows.length} rows but Shopify reported ${node.objectCount} objects`,
         node.id,
       );
-      rows = parseJsonl(text);
     }
 
     return {
@@ -609,6 +647,26 @@ export async function runBulkQuery(
 
 // ── JSONL helpers ───────────────────────────────────────────────────────
 
+function parseJsonlLine(
+  line: string,
+  lineNumber: number,
+): Record<string, unknown> | null {
+  if (line.trim() === "") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`Malformed JSONL at line ${lineNumber}: ${detail}`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(
+      `Malformed JSONL at line ${lineNumber}: expected a JSON object`,
+    );
+  }
+  return parsed as Record<string, unknown>;
+}
+
 /**
  * Parse a JSONL body: one JSON object per line. Blank lines are skipped.
  * A malformed line throws with a 1-based line number (physical, including
@@ -616,24 +674,72 @@ export async function runBulkQuery(
  */
 export function parseJsonl(text: string): Record<string, unknown>[] {
   if (text === "") return [];
-  const lines = text.split(/\r?\n/);
   const rows: Record<string, unknown>[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (line.trim() === "") continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      throw new Error(`Malformed JSONL at line ${i + 1}: ${detail}`);
+  let start = 0;
+  let lineNumber = 0;
+  while (start <= text.length) {
+    const nl = text.indexOf("\n", start);
+    const end = nl === -1 ? text.length : nl;
+    let line = text.slice(start, end);
+    if (line.endsWith("\r")) line = line.slice(0, -1);
+    lineNumber += 1;
+    const row = parseJsonlLine(line, lineNumber);
+    if (row) rows.push(row);
+    if (nl === -1) break;
+    start = nl + 1;
+  }
+  return rows;
+}
+
+/**
+ * Stream-parse JSONL from a Web ReadableStream. Decodes with
+ * `{stream:true}`, splits on "\n" (strips a trailing CR), and parses each
+ * complete line immediately into the rows array. The only leftover is the
+ * incomplete trailing line across chunk boundaries; there is no full-text
+ * buffer and no lines array.
+ */
+async function parseJsonlStream(
+  body: ReadableStream<Uint8Array>,
+): Promise<Record<string, unknown>[]> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  const rows: Record<string, unknown>[] = [];
+  let leftover = "";
+  let lineNumber = 0;
+
+  const consumeChunk = (chunk: string, final: boolean): void => {
+    leftover += chunk;
+    let nl = leftover.indexOf("\n");
+    while (nl >= 0) {
+      let line = leftover.slice(0, nl);
+      leftover = leftover.slice(nl + 1);
+      if (line.endsWith("\r")) line = line.slice(0, -1);
+      lineNumber += 1;
+      const row = parseJsonlLine(line, lineNumber);
+      if (row) rows.push(row);
+      nl = leftover.indexOf("\n");
     }
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error(
-        `Malformed JSONL at line ${i + 1}: expected a JSON object`,
-      );
+    if (final && leftover.length > 0) {
+      let line = leftover;
+      leftover = "";
+      if (line.endsWith("\r")) line = line.slice(0, -1);
+      lineNumber += 1;
+      const row = parseJsonlLine(line, lineNumber);
+      if (row) rows.push(row);
     }
-    rows.push(parsed as Record<string, unknown>);
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        consumeChunk(decoder.decode(), true);
+        break;
+      }
+      consumeChunk(decoder.decode(value, { stream: true }), false);
+    }
+  } finally {
+    reader.releaseLock();
   }
   return rows;
 }

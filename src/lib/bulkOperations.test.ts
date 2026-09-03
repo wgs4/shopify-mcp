@@ -132,7 +132,37 @@ function okFetch(body = JSONL_BODY): typeof fetch {
   const fetchMock = jest.fn(async () => ({
     ok: true,
     status: 200,
+    body: null,
     text: async () => body,
+  }));
+  return fetchMock as unknown as typeof fetch;
+}
+
+function streamFromChunks(chunks: string[]): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  return new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) {
+        controller.enqueue(encoder.encode(chunk));
+      }
+      controller.close();
+    },
+  });
+}
+
+function streamFetch(
+  chunks: string[],
+  textImpl?: () => Promise<string>,
+): typeof fetch {
+  const fetchMock = jest.fn(async () => ({
+    ok: true,
+    status: 200,
+    body: streamFromChunks(chunks),
+    text:
+      textImpl ??
+      (async () => {
+        throw new Error("text() should not be called when body is a stream");
+      }),
   }));
   return fetchMock as unknown as typeof fetch;
 }
@@ -371,7 +401,7 @@ describe("runBulkQuery", () => {
       pollNode({ status: "RUNNING", objectCount: "3" }),
       pollNode({
         status: "COMPLETED",
-        objectCount: "3",
+        objectCount: "2",
         rootObjectCount: "1",
         fileSize: "88",
         url: RESULT_URL,
@@ -389,7 +419,7 @@ describe("runBulkQuery", () => {
     );
 
     expect(result.id).toBe(OP_ID);
-    expect(result.objectCount).toBe(3);
+    expect(result.objectCount).toBe(2);
     expect(result.rootObjectCount).toBe(1);
     expect(result.url).toBe(RESULT_URL);
     expect(result.polls).toBe(4);
@@ -820,7 +850,7 @@ describe("runBulkQuery", () => {
     expect(err.bulkOperationId).toBe(OP_ID);
   });
 
-  test("objectCount equal to maxObjects is allowed", async () => {
+  test("COMPLETED with 250000 objects and a null URL throws INCONSISTENT", async () => {
     const clock = fakeClock();
     const { client } = fakeClient([
       submitOk(),
@@ -830,8 +860,34 @@ describe("runBulkQuery", () => {
         objectCount: 250000,
       }),
     ]);
-    const result = await runBulkQuery(client, INNER, runOpts(clock));
-    expect(result.objectCount).toBe(250000);
+    const err = await expectBulkReject(
+      runBulkQuery(client, INNER, runOpts(clock)),
+    );
+    expect(err.code).toBe("INCONSISTENT");
+    expect(err.message).toBe(
+      `Bulk operation ${OP_ID} completed with 250000 objects but no result URL; refusing to treat it as empty`,
+    );
+    expect(err.bulkOperationId).toBe(OP_ID);
+  });
+
+  test("objectCount equal to maxObjects with matching streamed rows is allowed", async () => {
+    const clock = fakeClock();
+    const fetchImpl = okFetch('{"id":"a"}\n{"id":"b"}');
+    const { client } = fakeClient([
+      submitOk(),
+      pollNode({
+        status: "COMPLETED",
+        url: RESULT_URL,
+        objectCount: 2,
+      }),
+    ]);
+    const result = await runBulkQuery(
+      client,
+      INNER,
+      runOpts(clock, { fetchImpl, maxObjects: 2 }),
+    );
+    expect(result.objectCount).toBe(2);
+    expect(result.rows).toEqual([{ id: "a" }, { id: "b" }]);
   });
 
   test("coerces string counts and treats garbage fileSize/objectCount as empty", async () => {
@@ -858,10 +914,12 @@ describe("runBulkQuery", () => {
         fileSize: "oops",
       }),
     ]);
-    await runBulkQuery(
-      client,
-      INNER,
-      runOpts(clock, { onTick: (op) => ticks.push(op) }),
+    const err = await expectBulkReject(
+      runBulkQuery(
+        client,
+        INNER,
+        runOpts(clock, { onTick: (op) => ticks.push(op) }),
+      ),
     );
     expect(ticks[0]).toMatchObject({
       objectCount: 12,
@@ -874,6 +932,8 @@ describe("runBulkQuery", () => {
       fileSize: null,
     });
     expect(ticks[2]).toMatchObject({ objectCount: 12, fileSize: null });
+    expect(err.code).toBe("INCONSISTENT");
+    expect(err.message).toMatch(/completed with 12 objects but no result URL/);
   });
 
   test("download non-2xx then ok on retry", async () => {
@@ -1039,6 +1099,100 @@ describe("runBulkQuery", () => {
     ]);
     const result = await runBulkQuery(client, INNER, runOpts(clock));
     expect(result.polls).toBe(1);
+  });
+
+  test("streams JSONL from body delivered in 3 chunks that split a line mid-way", async () => {
+    const clock = fakeClock();
+    const fetchImpl = streamFetch([
+      '{"id":"a"}\n{"id":"b',
+      '","n":',
+      '1}\n{"id":"c"}\n',
+    ]);
+    const { client } = fakeClient([
+      submitOk(),
+      pollNode({ status: "COMPLETED", url: RESULT_URL, objectCount: 3 }),
+    ]);
+    const result = await runBulkQuery(
+      client,
+      INNER,
+      runOpts(clock, { fetchImpl }),
+    );
+    expect(result.rows).toEqual([{ id: "a" }, { id: "b", n: 1 }, { id: "c" }]);
+    expect(result.objectCount).toBe(3);
+  });
+
+  test("body null falls back to text()", async () => {
+    const clock = fakeClock();
+    const text = jest.fn(async () => '{"id":"from-text"}');
+    const fetchImpl = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      body: null,
+      text,
+    })) as unknown as typeof fetch;
+    const { client } = fakeClient([
+      submitOk(),
+      pollNode({ status: "COMPLETED", url: RESULT_URL, objectCount: 1 }),
+    ]);
+    const result = await runBulkQuery(
+      client,
+      INNER,
+      runOpts(clock, { fetchImpl }),
+    );
+    expect(result.rows).toEqual([{ id: "from-text" }]);
+    expect(text).toHaveBeenCalledTimes(1);
+  });
+
+  test("row-count mismatch after download throws INCONSISTENT", async () => {
+    const clock = fakeClock();
+    const fetchImpl = okFetch('{"id":"only-one"}');
+    const { client } = fakeClient([
+      submitOk(),
+      pollNode({ status: "COMPLETED", url: RESULT_URL, objectCount: 2 }),
+    ]);
+    const err = await expectBulkReject(
+      runBulkQuery(client, INNER, runOpts(clock, { fetchImpl })),
+    );
+    expect(err.code).toBe("INCONSISTENT");
+    expect(err.message).toBe("parsed 1 rows but Shopify reported 2 objects");
+    expect(err.bulkOperationId).toBe(OP_ID);
+  });
+
+  test("url null with objectCount 0 yields rows []", async () => {
+    const clock = fakeClock();
+    const fetchImpl = jest.fn(async () => {
+      throw new Error("fetch should not be called");
+    }) as unknown as typeof fetch;
+    const { client } = fakeClient([
+      submitOk(),
+      pollNode({
+        status: "COMPLETED",
+        url: null,
+        objectCount: 0,
+      }),
+    ]);
+    const result = await runBulkQuery(
+      client,
+      INNER,
+      runOpts(clock, { fetchImpl }),
+    );
+    expect(result.rows).toEqual([]);
+    expect(result.url).toBeNull();
+    expect(result.objectCount).toBe(0);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  test("empty url string with objectCount > 0 throws INCONSISTENT", async () => {
+    const clock = fakeClock();
+    const { client } = fakeClient([
+      submitOk(),
+      pollNode({ status: "COMPLETED", url: "", objectCount: 4 }),
+    ]);
+    const err = await expectBulkReject(
+      runBulkQuery(client, INNER, runOpts(clock)),
+    );
+    expect(err.code).toBe("INCONSISTENT");
+    expect(err.message).toMatch(/completed with 4 objects but no result URL/);
   });
 
   test("download retry failure with a non-Error still throws DOWNLOAD_FAILED", async () => {
