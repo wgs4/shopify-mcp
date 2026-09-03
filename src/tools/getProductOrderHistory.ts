@@ -154,7 +154,7 @@ function visibilityIndeterminateError(
     visibleFrom: info.horizon,
   });
   err.message =
-    `read_all_orders is missing, so orders created before ${bound} are hidden ` +
+    `ScopeHorizonError: read_all_orders is missing, so orders created before ${bound} are hidden ` +
     `and any window can be incomplete (an older order shipped or refunded ` +
     `inside the window would be missed). Pass allow_incomplete=true to run ` +
     `anyway with completeness.status=partial, or obtain the scope.`;
