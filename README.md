@@ -2,7 +2,7 @@
 
 (please leave a star if you like!)
 
-MCP Server for Shopify API, enabling interaction with store data through GraphQL API. This server provides tools for managing products, customers, orders, and more.
+MCP Server for Shopify API, enabling interaction with store data through GraphQL API. This server provides **50 tools** (see `src/tools/registry.ts`) for managing products, customers, orders, and more.
 
 **📦 Package Name: `shopify-mcp`**
 **🚀 Command: `shopify-mcp` (NOT `shopify-mcp-server`)**
@@ -15,7 +15,8 @@ MCP Server for Shopify API, enabling interaction with store data through GraphQL
 
 - **Product Management**: Full CRUD for products, variants, and options (8 tools)
 - **Customer Management**: Full CRUD, merge, and address management (8 tools)
-- **Order Management**: Smart lookup, cancel, close/open, mark as paid, fulfillment, refunds (10 tools)
+- **Order Management**: Smart lookup, cancel, close/open, mark as paid, fulfillment, refunds, draft orders (11 tools)
+- **Fulfillment Orders**: Read fulfillment orders (throws `MissingScopeError` without the FO scopes) (1 tool)
 - **Product Order History**: Per-SKU / per-product unit counts on each event's own clock, fail-closed at the 60-day order wall (1 tool)
 - **Metafield Management**: Get, set, and delete metafields on any resource (3 tools)
 - **Inventory Management**: Set absolute inventory quantities at locations (1 tool)
@@ -170,7 +171,7 @@ shopify-mcp --clientId=<ID> --clientSecret=<SECRET> --domain=<YOUR_SHOP>.myshopi
 
 **⚠️ Important:** If you see errors about "SHOPIFY_ACCESS_TOKEN environment variable is required" when using command-line arguments, you might have a different package installed. Make sure you're using `shopify-mcp`, not `shopify-mcp-server`.
 
-## Available Tools (35)
+## Available Tools (50)
 
 ### Pagination, Sorting & Filtering
 
@@ -358,13 +359,13 @@ All list query tools (`get-products`, `get-customers`, `get-orders`, `get-custom
      - `address` (object, optional): Address fields (required for create/update): `address1`, `address2`, `city`, `company`, `countryCode`, `firstName`, `lastName`, `phone`, `provinceCode`, `zip`
      - `setAsDefault` (boolean, optional): Set as customer's default address
 
-### Order Management (10 tools)
+### Order Management (11 tools)
 
 ### The 60-day order wall
 
 An app token with `read_orders` but without `read_all_orders` only sees the last 60 days of orders. Older orders vanish silently (HTTP 200, empty edges, no errors). Bulk operations obey the same wall. `get-orders` fails closed: a search query that can reach before the horizon throws `ScopeHorizonError` instead of returning a convincing empty set. `get-order-by-id` uses the same wall on a miss (the not-found message names the horizon). `get-customer-orders` has no date input, so it always runs and still returns the wall metadata.
 
-Successful responses from those three tools include a `horizon` block: `wall_days` (60), `horizon` (ISO instant), `horizon_shop_date` (shop-local YYYY-MM-DD), and `scope_missing` (`read_all_orders` or `null`). See `docs/shopify-scope-request.md`.
+Successful responses from those three tools include a `horizon` block: `wall_days` (60), `horizon` (ISO instant), `horizon_shop_date` (shop-local YYYY-MM-DD), `first_visible_date` (earliest bare `YYYY-MM-DD` the guard accepts), and `scope_missing` (`read_all_orders` or `null`). See `docs/shopify-scope-request.md`.
 
 1. **`get-orders`**
 
@@ -460,6 +461,13 @@ Successful responses from those three tools include a `horizon` block: `wall_day
       - `shippingAddress`, `billingAddress` (objects, optional)
       - `appliedDiscount` (object, optional): `{ title, value, valueType }` order-level discount
 
+11. **`get-fulfillment-orders`**
+
+    - Get fulfillment orders for an order including status, assigned location, delivery method, holds, and line items
+    - Inputs:
+      - `orderId` (string, required): Order GID or numeric id
+    - Throws `MissingScopeError` when the token lacks the fulfillment-order scopes (`read_merchant_managed_fulfillment_orders`, `read_assigned_fulfillment_orders`, `read_third_party_fulfillment_orders`)
+
 ### Product Order History (1 tool)
 
 1. **`get-product-order-history`**
@@ -483,9 +491,15 @@ Successful responses from those three tools include a `horizon` block: `wall_day
      - Explicit failure if an order has more nested fulfillments/refunds/returns than one page (refuses to undercount).
    - `units_returned` is `null` without `read_returns`. Without `read_all_orders` and with `allow_incomplete=true`, `completeness.status` is `partial`, `horizon_ok` is false, and `warnings[0]` starts with `INCOMPLETE`.
 
-### Draft Order Management (1 tool)
+### Draft Order Management (2 tools)
 
-1. **`complete-draft-order`**
+1. **`get-draft-order`**
+
+   - Get a single draft order by name (e.g. `D359`), bare number, or GID, including line items
+   - Inputs:
+     - `draftOrder` (string, required): Draft order name, number, or GID
+
+2. **`complete-draft-order`**
 
    - Complete a draft order, converting it into a real order
    - Inputs:
@@ -574,13 +588,15 @@ These tools query Shopify Payments payouts so you can match bank deposits agains
 
 ### Order Query Filter Reference
 
-The `get-orders` tool's `query` parameter supports [Shopify search syntax](https://shopify.dev/docs/api/usage/search-syntax):
+The `get-orders` tool's `query` parameter supports [Shopify search syntax](https://shopify.dev/docs/api/usage/search-syntax).
+
+Without `read_all_orders`, any date predicate must include a conjunctive `created_at:>=` bound at or after `horizon.first_visible_date` (or `created_at:>='<horizon ISO>'`). Upper-only, `updated_at`/`processed_at`-only, `OR`, `NOT`/negated, parenthesised, or malformed date predicates throw `ScopeHorizonError`.
 
 | Filter | Example |
 |--------|---------|
 | `name` | `name:#77235` |
-| `created_at` | `created_at:>2024-01-01` or `created_at:2024-01-01..2024-03-31` |
-| `updated_at` | `updated_at:>2024-06-01` |
+| `created_at` | `created_at:>=2026-08-01` or `created_at:2026-08-01..2026-09-03` |
+| `updated_at` | `updated_at:>=2026-08-01` |
 | `financial_status` | `financial_status:paid` |
 | `fulfillment_status` | `fulfillment_status:shipped` |
 | `status` | `status:open` |
