@@ -16,7 +16,7 @@ MCP Server for Shopify API, enabling interaction with store data through GraphQL
 - **Product Management**: Full CRUD for products, variants, and options (8 tools)
 - **Customer Management**: Full CRUD, merge, and address management (8 tools)
 - **Order Management**: Smart lookup, cancel, close/open, mark as paid, fulfillment, refunds, draft orders (11 tools)
-- **Fulfillment Orders**: Read fulfillment orders (throws `MissingScopeError` without the FO scopes) (1 tool)
+- **Fulfillment Orders**: Read fulfillment orders (throws `MissingScopeError` without the FO scopes; counted in Order Management)
 - **Product Order History**: Per-SKU / per-product unit counts on each event's own clock, fail-closed at the 60-day order wall (1 tool)
 - **Metafield Management**: Get, set, and delete metafields on any resource (3 tools)
 - **Inventory Management**: Set absolute inventory quantities at locations (1 tool)
@@ -48,7 +48,7 @@ As of January 1, 2026, new Shopify apps are created in the **Dev Dashboard** and
    - `read_products`, `write_products`
    - `read_customers`, `write_customers`
    - `read_orders`, `write_orders`
-   - `read_all_orders` (optional but recommended: without it, orders older than 60 days vanish silently)
+   - `read_all_orders` (optional but recommended: without it Shopify hides orders older than 60 days, and this server fails closed with `ScopeHorizonError` instead of returning empty results)
    - `read_returns` (optional but recommended: without it, `units_returned` is null)
    - `read_merchant_managed_fulfillment_orders`, `read_assigned_fulfillment_orders`, `read_third_party_fulfillment_orders` (optional but recommended: needed for fulfillment-order reads and the unfulfilled cross-check)
    - See `docs/shopify-scope-request.md` for why these are requested and how to grant them.
@@ -367,7 +367,7 @@ All list query tools (`get-products`, `get-customers`, `get-orders`, `get-custom
 
 An app token with `read_orders` but without `read_all_orders` only sees the last 60 days of orders. Older orders vanish silently (HTTP 200, empty edges, no errors). Bulk operations obey the same wall. `get-orders` fails closed: a search query that can reach before the horizon throws `ScopeHorizonError` instead of returning a convincing empty set. `get-order-by-id` uses the same wall on a miss (the not-found message names the horizon). `get-customer-orders` has no date input, so it always runs and still returns the wall metadata.
 
-Successful responses from those three tools include a `horizon` block: `wall_days` (60), `horizon` (ISO instant), `horizon_shop_date` (shop-local YYYY-MM-DD), `first_visible_date` (earliest bare `YYYY-MM-DD` the guard accepts), and `scope_missing` (`read_all_orders` or `null`). See `docs/shopify-scope-request.md`.
+Successful responses from those three tools include a `horizon` block: `wall_days` (60), `horizon` (ISO instant), `horizon_shop_date` (shop-local YYYY-MM-DD), `first_visible_date` (earliest bare `YYYY-MM-DD` the guard accepts), `scope_missing` (`read_all_orders` or `null`), and `oldest_visible_order_created_at` (`createdAt` of the oldest order the token can currently see, or `null`). See `docs/shopify-scope-request.md`.
 
 1. **`get-orders`**
 
@@ -375,7 +375,7 @@ Successful responses from those three tools include a `horizon` block: `wall_day
    - Inputs:
      - `status` (string, optional): `"any"`, `"open"`, `"closed"`, or `"cancelled"`. Default `"any"`
      - `limit` (number, default: 10): Maximum number of orders to return
-     - `query` (string, optional): Raw Shopify query string (e.g. `"financial_status:paid fulfillment_status:shipped tag:rush"`)
+     - `query` (string, optional, max 4,096 characters): Raw Shopify query string (e.g. `"financial_status:paid fulfillment_status:shipped tag:rush"`)
      - `sortKey` (string, optional): One of `CREATED_AT`, `ORDER_NUMBER`, `TOTAL_PRICE`, `FINANCIAL_STATUS`, `FULFILLMENT_STATUS`, `UPDATED_AT`, `CUSTOMER_NAME`, `PROCESSED_AT`, `ID`, `RELEVANCE`
      - `reverse` (boolean, optional): Reverse the sort order
      - `after` / `before` (string, optional): Pagination cursors
@@ -474,20 +474,20 @@ Successful responses from those three tools include a `horizon` block: `wall_day
 
 1. **`get-product-order-history`**
 
-   - Count units ordered, shipped, cancelled, refunded, returned, and unfulfilled for specific SKUs or one product over a shop-local date window. Each metric uses its **own clock** (order `createdAt` vs SUCCESS fulfillment `createdAt` vs refund `createdAt` vs CLOSED return `createdAt`). Dates are shop-local (`shop.ianaTimezone`), never UTC.
+   - Count units ordered, shipped, cancelled, refunded, returned, and unfulfilled for specific SKUs or one product over a shop-local date window. Each metric uses its **own clock** (order `createdAt` for ordered, SUCCESS fulfillment `createdAt` for shipped, order `cancelledAt` for cancelled, refund `createdAt` for refunded, CLOSED return `createdAt` for returned). Dates are shop-local (`shop.ianaTimezone`), never UTC.
    - Inputs:
-     - `skus` (array of strings, optional): 1-20 SKUs. Exactly one of `skus` or `productId` is required.
+     - `skus` (array of strings, optional): 1-20 SKUs, matched exactly but case-insensitively against each line item's recorded SKU (not the variant's current SKU), so pass every historical SKU of the product. Exactly one of `skus` or `productId` is required.
      - `productId` (string, optional): Product GID or numeric id.
      - `since` / `until` (string, required): Inclusive shop-local dates, `YYYY-MM-DD`. `until` must be `>= since`.
      - `basis` (string, default `"fulfillment"`): `"fulfillment"`, `"order"`, or `"refund"` (which clock counts toward `orders`).
      - `group_by` (string, default `"none"`): `"none"`, `"month"`, or `"channel"`.
      - `include_test_orders` (boolean, default false)
-     - `include_orders` (boolean, default false): include per-order evidence (`orders_evidence`)
+     - `include_orders` (boolean, default false): include per-order evidence (`orders_evidence`, capped at 500 rows; `orders_truncated` is true when the cap was hit)
      - `allow_incomplete` (boolean, default false): run without `read_all_orders` and accept `completeness.status=partial`
      - `force_bulk` (boolean, default false): use a Shopify bulk operation even when the window is 90 days or less
-   - Returns: `store`, `skus` or `product_id`, `since`, `until`, `timezone`, `basis`, `group_by`, unit totals (`units_ordered`, `units_ordered_current`, `units_shipped`, `units_cancelled`, `units_refunded`, `refunded_amount`, `units_returned`, `units_unfulfilled`, `orders`), `matched_orders`, `horizon_ok`, `completeness`, `horizon`, `source` (`kind` cursor|bulk, `bulk_operation_id`, `candidate_orders`, `requests`, `query`), `reconciliation`, `buckets`, `warnings`, optional `orders_evidence`, `orders_truncated`.
+   - Returns: `store`, `skus` or `product_id`, `since`, `until`, `timezone`, `basis`, `group_by`, unit totals (`units_ordered`, `units_ordered_current`, `units_shipped`, `units_cancelled`, `units_refunded`, `refunded_amount`, `units_returned`, `units_unfulfilled`, `orders`), `matched_orders`, `horizon_ok`, `completeness` (`status` complete|partial, `reason` `read_all_orders_missing` or `null`, `visible_from` ISO instant or `null`), `horizon`, `source` (`kind` cursor|bulk, `bulk_operation_id`, `candidate_orders`, `requests`, `query`, `max_requested_query_cost`), `reconciliation`, `buckets`, `warnings`, optional `orders_evidence`, `orders_truncated`.
    - Errors:
-     - `ScopeHorizonError` when `read_all_orders` is missing and `allow_incomplete` is false (ranges before the 60-day wall, and any window that could miss an older order shipping or refunding inside it).
+     - `ScopeHorizonError` on every call when `read_all_orders` is missing and `allow_incomplete` is false: `before_horizon` when the range starts before the 60-day wall, otherwise `visibility_indeterminate` (an older order could have shipped or refunded inside any window).
      - `MissingScopeError` when Shopify returns ACCESS_DENIED for `returns` or `fulfillmentOrders`.
      - `BulkOperationError` when a bulk candidate scan fails.
      - Explicit failure if an order has more nested fulfillments/refunds/returns than one page (refuses to undercount).
