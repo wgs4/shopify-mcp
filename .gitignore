@@ -25,3 +25,6 @@ Thumbs.db
 
 # Autonomous-run artifacts (see ~/.claude/skills/shared-guidelines)
 .agent-loop/
+
+# gstack local reports
+.gstack/
