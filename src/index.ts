@@ -99,10 +99,14 @@ const server = new McpServer({
     "MCP Server for Shopify API, enabling interaction with store data through GraphQL API"
 });
 
-// Register all tools with the MCP server
+// Register all tools with the MCP server.
+// Description MUST be the second argument: the SDK only stores a
+// description when rest[0] is a string. Passing schema.shape second
+// silently drops tool.description from tools/list.
 for (const tool of tools) {
   server.tool(
     tool.name,
+    tool.description,
     tool.schema.shape,
     async (args) => {
       const result = await tool.execute(args);
