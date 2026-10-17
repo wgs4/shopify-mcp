@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { handleToolError } from "../lib/toolUtils.js";
+import { handleToolError, type StoreContext } from "../lib/toolUtils.js";
 import { xtupleBridge } from "../lib/xtupleBridge.js";
 
 // Input schema for getDraftOrder
@@ -16,9 +15,6 @@ const GetDraftOrderInputSchema = z.object({
 
 type GetDraftOrderInput = z.infer<typeof GetDraftOrderInputSchema>;
 
-// Will be initialized in index.ts
-let shopifyClient: GraphQLClient;
-
 interface DraftOrderRef {
   node: { id: string; name: string };
 }
@@ -29,11 +25,7 @@ const getDraftOrder = {
     "Get a single draft order by name (e.g. D359), bare number, or GID — including line items with per-line quantities, SKU, unit price, status, note, and PO number. Fills the read gap left by create-/complete-draft-order.",
   schema: GetDraftOrderInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: GetDraftOrderInput) => {
+  execute: async (input: GetDraftOrderInput, ctx: StoreContext) => {
     try {
       const trimmed = input.draftOrder.trim();
       let resolvedId: string;
@@ -62,7 +54,7 @@ const getDraftOrder = {
         `;
 
         const runSearch = async (q: string): Promise<DraftOrderRef[]> => {
-          const res = (await shopifyClient.request(findQuery, { query: q })) as {
+          const res = (await ctx.client.request(findQuery, { query: q })) as {
             draftOrders: { edges: DraftOrderRef[] };
           };
           return res.draftOrders.edges;
@@ -178,7 +170,7 @@ const getDraftOrder = {
         }
       `;
 
-      const data = (await shopifyClient.request(query, { id: resolvedId })) as {
+      const data = (await ctx.client.request(query, { id: resolvedId })) as {
         draftOrder: any;
       };
 
@@ -233,7 +225,7 @@ const getDraftOrder = {
           : null,
         completedOrder: d.order ? { id: d.order.id, name: d.order.name } : null,
         // Bridge to the WGS xTuple sales order this draft imports as.
-        xtuple: xtupleBridge(d.name),
+        xtuple: xtupleBridge(d.name, ctx.domain),
         totalPrice: d.totalPriceSet?.shopMoney ?? null,
         subtotalPrice: d.subtotalPriceSet?.shopMoney ?? null,
         totalTax: d.totalTaxSet?.shopMoney ?? null,

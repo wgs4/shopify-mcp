@@ -1,6 +1,19 @@
 import type { GraphQLClient } from "graphql-request";
 import type { z } from "zod";
 
+/**
+ * Per-call Shopify connection. Single-store mode has one of these.
+ * Multi-store mode builds one per configured store and passes the one
+ * the caller named.
+ */
+export interface StoreContext {
+  client: GraphQLClient;
+  domain: string;
+  storeKey: string;
+  getAccessToken: () => string;
+  apiVersion: string;
+}
+
 // ── Shared Shopify types ──────────────────────────────────────────────
 
 export interface ShopifyUserError {
@@ -34,8 +47,7 @@ export interface ShopifyTool {
   name: string;
   description: string;
   schema: z.ZodObject<z.ZodRawShape>;
-  initialize(client: GraphQLClient): void;
-  execute(args: Record<string, unknown>): Promise<unknown>;
+  execute(args: Record<string, unknown>, ctx: StoreContext): Promise<unknown>;
 }
 
 // ── Utility functions ─────────────────────────────────────────────────

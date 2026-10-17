@@ -1,4 +1,3 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
 import {
@@ -6,7 +5,7 @@ import {
   isAccessDeniedError,
   missingScopeError,
 } from "../lib/accessScopes.js";
-import { edgesToNodes, handleToolError } from "../lib/toolUtils.js";
+import { edgesToNodes, handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 const GetFulfillmentOrdersInputSchema = z.object({
   orderId: z
@@ -20,19 +19,13 @@ type GetFulfillmentOrdersInput = z.infer<
   typeof GetFulfillmentOrdersInputSchema
 >;
 
-let shopifyClient: GraphQLClient;
-
 const getFulfillmentOrders = {
   name: "get-fulfillment-orders",
   description:
     "Get fulfillment orders for an order including status, assigned location, delivery method, holds, and line items",
   schema: GetFulfillmentOrdersInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: GetFulfillmentOrdersInput) => {
+  execute: async (input: GetFulfillmentOrdersInput, ctx: StoreContext) => {
     try {
       const orderId = input.orderId.startsWith("gid://")
         ? input.orderId
@@ -102,7 +95,7 @@ const getFulfillmentOrders = {
         }
       `;
 
-      const data: any = await shopifyClient.request(query, { id: orderId });
+      const data: any = await ctx.client.request(query, { id: orderId });
 
       if (!data.order) {
         throw new Error(`Order not found: ${orderId}`);

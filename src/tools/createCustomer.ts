@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { checkUserErrors, handleToolError, edgesToNodes } from "../lib/toolUtils.js";
+import { checkUserErrors, handleToolError, edgesToNodes, type StoreContext } from "../lib/toolUtils.js";
 
 // Input schema for creating a customer
 const CreateCustomerInputSchema = z.object({
@@ -39,20 +38,12 @@ const CreateCustomerInputSchema = z.object({
 
 type CreateCustomerInput = z.infer<typeof CreateCustomerInputSchema>;
 
-// Will be initialized in index.ts
-let shopifyClient: GraphQLClient;
-
 const createCustomer = {
   name: "create-customer",
   description: "Create a new customer",
   schema: CreateCustomerInputSchema,
 
-  // Add initialize method to set up the GraphQL client
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: CreateCustomerInput) => {
+  execute: async (input: CreateCustomerInput, ctx: StoreContext) => {
     try {
       const query = gql`
         #graphql
@@ -121,7 +112,7 @@ const createCustomer = {
         }
       };
 
-      const data = (await shopifyClient.request(query, variables)) as {
+      const data = (await ctx.client.request(query, variables)) as {
         customerCreate: {
           customer: any;
           userErrors: Array<{

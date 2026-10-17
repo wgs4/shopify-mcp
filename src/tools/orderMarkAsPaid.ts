@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { checkUserErrors, handleToolError } from "../lib/toolUtils.js";
+import { checkUserErrors, handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 const OrderMarkAsPaidInputSchema = z.object({
   orderId: z.string().describe("The order GID, e.g. gid://shopify/Order/123"),
@@ -9,19 +8,13 @@ const OrderMarkAsPaidInputSchema = z.object({
 
 type OrderMarkAsPaidInput = z.infer<typeof OrderMarkAsPaidInputSchema>;
 
-let shopifyClient: GraphQLClient;
-
 const orderMarkAsPaid = {
   name: "order-mark-as-paid",
   description:
     "Mark an order as paid. Useful for manual/offline payments (cash, bank deposit, etc.).",
   schema: OrderMarkAsPaidInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: OrderMarkAsPaidInput) => {
+  execute: async (input: OrderMarkAsPaidInput, ctx: StoreContext) => {
     try {
       const query = gql`
         #graphql
@@ -47,7 +40,7 @@ const orderMarkAsPaid = {
         }
       `;
 
-      const data = (await shopifyClient.request(query, {
+      const data = (await ctx.client.request(query, {
         input: { id: input.orderId },
       })) as {
         orderMarkAsPaid: {

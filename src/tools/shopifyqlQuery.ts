@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { handleToolError } from "../lib/toolUtils.js";
+import { handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 const ShopifyqlQueryInputSchema = z.object({
   query: z
@@ -13,19 +12,13 @@ const ShopifyqlQueryInputSchema = z.object({
 
 type ShopifyqlQueryInput = z.infer<typeof ShopifyqlQueryInputSchema>;
 
-let shopifyClient: GraphQLClient;
-
 const shopifyqlQuery = {
   name: "shopifyql-query",
   description:
     "Execute a ShopifyQL analytics query against the store's reporting engine. Returns the same data shown in Shopify Admin dashboards and reports (Total Sales, Sales by Product, etc). Use for accurate financial reporting including gross sales, discounts, reversals, net sales, shipping, taxes, and total sales. Requires the read_reports access scope.",
   schema: ShopifyqlQueryInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: ShopifyqlQueryInput) => {
+  execute: async (input: ShopifyqlQueryInput, ctx: StoreContext) => {
     try {
       const query = gql`
         #graphql
@@ -47,7 +40,7 @@ const shopifyqlQuery = {
 
       const variables = { query: input.query };
 
-      const data = (await shopifyClient.request(query, variables)) as {
+      const data = (await ctx.client.request(query, variables)) as {
         shopifyqlQuery: {
           tableData: {
             columns: Array<{

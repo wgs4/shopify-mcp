@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { handleToolError, edgesToNodes } from "../lib/toolUtils.js";
+import { handleToolError, edgesToNodes, type StoreContext } from "../lib/toolUtils.js";
 
 // Input schema for getCustomers
 const GetCustomersInputSchema = z.object({
@@ -18,20 +17,12 @@ const GetCustomersInputSchema = z.object({
 
 type GetCustomersInput = z.infer<typeof GetCustomersInputSchema>;
 
-// Will be initialized in index.ts
-let shopifyClient: GraphQLClient;
-
 const getCustomers = {
   name: "get-customers",
   description: "Get customers or search by name/email",
   schema: GetCustomersInputSchema,
 
-  // Add initialize method to set up the GraphQL client
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: GetCustomersInput) => {
+  execute: async (input: GetCustomersInput, ctx: StoreContext) => {
     try {
       const { searchQuery, limit, after, before, sortKey, reverse } = input;
 
@@ -102,7 +93,7 @@ const getCustomers = {
         ...(reverse !== undefined && { reverse })
       };
 
-      const data = (await shopifyClient.request(query, variables)) as {
+      const data = (await ctx.client.request(query, variables)) as {
         customers: any;
       };
 

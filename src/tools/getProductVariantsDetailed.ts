@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { edgesToNodes, handleToolError } from "../lib/toolUtils.js";
+import { edgesToNodes, handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 const GetProductVariantsDetailedInputSchema = z.object({
   productId: z
@@ -22,19 +21,13 @@ type GetProductVariantsDetailedInput = z.infer<
   typeof GetProductVariantsDetailedInputSchema
 >;
 
-let shopifyClient: GraphQLClient;
-
 const getProductVariantsDetailed = {
   name: "get-product-variants-detailed",
   description:
     "Get all variant fields for a product: pricing, inventory, barcode, weight, tax code, selected options, metafields, and image",
   schema: GetProductVariantsDetailedInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: GetProductVariantsDetailedInput) => {
+  execute: async (input: GetProductVariantsDetailedInput, ctx: StoreContext) => {
     try {
       const productId = input.productId.startsWith("gid://")
         ? input.productId
@@ -115,7 +108,7 @@ const getProductVariantsDetailed = {
         }
       `;
 
-      const data: any = await shopifyClient.request(query, {
+      const data: any = await ctx.client.request(query, {
         id: productId,
         first: input.first ?? 50,
       });

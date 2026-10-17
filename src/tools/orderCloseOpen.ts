@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { checkUserErrors, handleToolError } from "../lib/toolUtils.js";
+import { checkUserErrors, handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 const OrderCloseOpenInputSchema = z.object({
   orderId: z.string().describe("The order GID, e.g. gid://shopify/Order/123"),
@@ -10,19 +9,13 @@ const OrderCloseOpenInputSchema = z.object({
 
 type OrderCloseOpenInput = z.infer<typeof OrderCloseOpenInputSchema>;
 
-let shopifyClient: GraphQLClient;
-
 const orderCloseOpen = {
   name: "order-close-open",
   description:
     "Close or reopen an order. Closing marks all items fulfilled and finances complete. Opening reopens a closed order.",
   schema: OrderCloseOpenInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: OrderCloseOpenInput) => {
+  execute: async (input: OrderCloseOpenInput, ctx: StoreContext) => {
     try {
       if (input.action === "close") {
         const query = gql`
@@ -44,7 +37,7 @@ const orderCloseOpen = {
           }
         `;
 
-        const data = (await shopifyClient.request(query, {
+        const data = (await ctx.client.request(query, {
           input: { id: input.orderId },
         })) as {
           orderClose: {
@@ -76,7 +69,7 @@ const orderCloseOpen = {
           }
         `;
 
-        const data = (await shopifyClient.request(query, {
+        const data = (await ctx.client.request(query, {
           input: { id: input.orderId },
         })) as {
           orderOpen: {

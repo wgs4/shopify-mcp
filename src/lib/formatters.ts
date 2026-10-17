@@ -93,7 +93,7 @@ interface RawOrderNode {
  * Format a raw order node into the standard order summary shape.
  * Used by getOrders, getCustomerOrders, and getOrderById (as a base).
  */
-export function formatOrderSummary(order: RawOrderNode) {
+export function formatOrderSummary(order: RawOrderNode, domain?: string) {
   return {
     id: order.id,
     name: order.name,
@@ -117,6 +117,6 @@ export function formatOrderSummary(order: RawOrderNode) {
     tags: order.tags,
     note: order.note,
     // Bridge to the WGS xTuple sales order this Shopify order imports as.
-    xtuple: xtupleBridge(order.name),
+    xtuple: xtupleBridge(order.name, domain),
   };
 }

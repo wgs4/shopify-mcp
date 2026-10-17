@@ -54,10 +54,8 @@ export const XTUPLE_STORE_MAP: Record<string, XtupleStoreInfo> = {
   },
 };
 
-/** Resolve the bridge info for a store domain (defaults to this server's store). */
-export function getStoreInfo(
-  domain: string | undefined = process.env.MYSHOPIFY_DOMAIN,
-): XtupleStoreInfo | null {
+/** Resolve the bridge info for a store domain. */
+export function getStoreInfo(domain?: string): XtupleStoreInfo | null {
   if (!domain) return null;
   return XTUPLE_STORE_MAP[domain.trim().toLowerCase()] ?? null;
 }
@@ -71,7 +69,7 @@ export function getStoreInfo(
  */
 export function deriveXtuplePoNumber(
   shopifyName: string,
-  domain: string | undefined = process.env.MYSHOPIFY_DOMAIN,
+  domain?: string,
 ): string | null {
   const info = getStoreInfo(domain);
   if (!info || !shopifyName) return null;
@@ -89,7 +87,7 @@ export function deriveXtuplePoNumber(
  */
 export function xtupleBridge(
   shopifyName: string,
-  domain: string | undefined = process.env.MYSHOPIFY_DOMAIN,
+  domain?: string,
 ): { customer: string; brand: string; poNumber: string | null } | null {
   const info = getStoreInfo(domain);
   if (!info) return null;

@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { checkUserErrors, handleToolError } from "../lib/toolUtils.js";
+import { checkUserErrors, handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 const SetMetafieldsInputSchema = z.object({
   metafields: z
@@ -21,19 +20,13 @@ const SetMetafieldsInputSchema = z.object({
 
 type SetMetafieldsInput = z.infer<typeof SetMetafieldsInputSchema>;
 
-let shopifyClient: GraphQLClient;
-
 const setMetafields = {
   name: "set-metafields",
   description:
     "Set metafields on any Shopify resource (products, orders, customers, variants, collections, etc.). Creates or updates up to 25 metafields atomically.",
   schema: SetMetafieldsInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: SetMetafieldsInput) => {
+  execute: async (input: SetMetafieldsInput, ctx: StoreContext) => {
     try {
       const query = gql`
         #graphql
@@ -57,7 +50,7 @@ const setMetafields = {
         }
       `;
 
-      const data = (await shopifyClient.request(query, {
+      const data = (await ctx.client.request(query, {
         metafields: input.metafields,
       })) as {
         metafieldsSet: {

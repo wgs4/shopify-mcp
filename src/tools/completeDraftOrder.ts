@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { checkUserErrors, handleToolError } from "../lib/toolUtils.js";
+import { checkUserErrors, handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 const CompleteDraftOrderInputSchema = z.object({
   draftOrderId: z.string().describe("The draft order GID, e.g. gid://shopify/DraftOrder/123"),
@@ -10,19 +9,13 @@ const CompleteDraftOrderInputSchema = z.object({
 
 type CompleteDraftOrderInput = z.infer<typeof CompleteDraftOrderInputSchema>;
 
-let shopifyClient: GraphQLClient;
-
 const completeDraftOrder = {
   name: "complete-draft-order",
   description:
     "Complete a draft order, converting it into a real order. Optionally specify a payment gateway.",
   schema: CompleteDraftOrderInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: CompleteDraftOrderInput) => {
+  execute: async (input: CompleteDraftOrderInput, ctx: StoreContext) => {
     try {
       const query = gql`
         #graphql
@@ -60,7 +53,7 @@ const completeDraftOrder = {
         variables.paymentGatewayId = input.paymentGatewayId;
       }
 
-      const data = (await shopifyClient.request(query, variables)) as {
+      const data = (await ctx.client.request(query, variables)) as {
         draftOrderComplete: {
           draftOrder: any;
           userErrors: Array<{ field: string; message: string }>;

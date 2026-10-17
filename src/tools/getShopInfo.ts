@@ -1,12 +1,9 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { handleToolError } from "../lib/toolUtils.js";
+import { handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 const GetShopInfoInputSchema = z.object({});
 type GetShopInfoInput = z.infer<typeof GetShopInfoInputSchema>;
-
-let shopifyClient: GraphQLClient;
 
 const getShopInfo = {
   name: "get-shop-info",
@@ -14,11 +11,7 @@ const getShopInfo = {
     "Get shop configuration including name, plan, currencies, features, payment settings, tax config, and contact info",
   schema: GetShopInfoInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (_input: GetShopInfoInput) => {
+  execute: async (_input: GetShopInfoInput, ctx: StoreContext) => {
     try {
       const query = gql`
         #graphql
@@ -72,7 +65,7 @@ const getShopInfo = {
         }
       `;
 
-      const data: any = await shopifyClient.request(query);
+      const data: any = await ctx.client.request(query);
 
       return { shop: data.shop };
     } catch (error) {

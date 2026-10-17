@@ -30,7 +30,6 @@
  *   top-level totals + horizon + source + warnings
  */
 
-import type { GraphQLClient } from "graphql-request";
 import { z } from "zod";
 
 import { getAccessScopes, hasScope } from "../lib/accessScopes.js";
@@ -65,7 +64,7 @@ import {
   monthKey,
   monthsBetween,
 } from "../lib/shopTime.js";
-import { handleToolError } from "../lib/toolUtils.js";
+import { handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 const GetProductOrderHistoryObjectSchema = z.object({
   skus: z
@@ -144,8 +143,6 @@ type GetProductOrderHistoryInput = z.infer<
   typeof GetProductOrderHistoryInputSchema
 >;
 
-let shopifyClient: GraphQLClient;
-
 function visibilityIndeterminateError(
   scopes: string[],
   since: string,
@@ -182,12 +179,9 @@ const getProductOrderHistory = {
     "units_returned is null when the token lacks read_returns (refunds are still reported). Pass include_orders=true for per-order evidence. force_bulk uses a Shopify bulk operation instead of cursor pagination.",
   schema: GetProductOrderHistoryObjectSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
   execute: async (
     input: Record<string, unknown> | GetProductOrderHistoryInput,
+    ctx: StoreContext,
     deps?: OrderHistoryFetchDeps,
   ) => {
     try {
@@ -206,8 +200,8 @@ const getProductOrderHistory = {
         force_bulk: forceBulk,
       } = parsed;
 
-      const scopes = await getAccessScopes(shopifyClient);
-      const tz = await getShopTimezone(shopifyClient);
+      const scopes = await getAccessScopes(ctx.client);
+      const tz = await getShopTimezone(ctx.client);
       const window = buildShopWindow(since, until, tz);
       const asOf = new Date(nowMs).toISOString();
 
@@ -241,7 +235,7 @@ const getProductOrderHistory = {
       }
 
       const scan = await fetchCandidates(
-        shopifyClient,
+        ctx.client,
         { since, until, tz, forceBulk },
         deps,
       );
@@ -251,7 +245,7 @@ const getProductOrderHistory = {
       );
 
       const details = await fetchOrderDetails(
-        shopifyClient,
+        ctx.client,
         matching,
         scopes,
         deps,
@@ -282,7 +276,7 @@ const getProductOrderHistory = {
 
       const warnings = leadWarnings.concat(result.warnings);
       const oldestVisible = await getOldestVisibleOrderCreatedAt(
-        shopifyClient,
+        ctx.client,
         { nowMs },
       );
       const horizon = {
@@ -291,7 +285,7 @@ const getProductOrderHistory = {
       };
 
       const response: Record<string, unknown> = {
-        store: process.env.MYSHOPIFY_DOMAIN ?? "",
+        store: ctx.domain,
       };
       if (skus) {
         response.skus = skus;

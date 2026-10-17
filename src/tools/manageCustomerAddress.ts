@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { checkUserErrors, handleToolError } from "../lib/toolUtils.js";
+import { checkUserErrors, handleToolError, type StoreContext } from "../lib/toolUtils.js";
 import { shippingAddressSchema } from "../lib/formatters.js";
 
 const ManageCustomerAddressInputSchema = z.object({
@@ -14,19 +13,13 @@ const ManageCustomerAddressInputSchema = z.object({
 
 type ManageCustomerAddressInput = z.infer<typeof ManageCustomerAddressInputSchema>;
 
-let shopifyClient: GraphQLClient;
-
 const manageCustomerAddress = {
   name: "manage-customer-address",
   description:
     "Create, update, or delete a customer's mailing address. Can optionally set as default.",
   schema: ManageCustomerAddressInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: ManageCustomerAddressInput) => {
+  execute: async (input: ManageCustomerAddressInput, ctx: StoreContext) => {
     try {
       if (input.action === "create") {
         if (!input.address) {
@@ -67,7 +60,7 @@ const manageCustomerAddress = {
           }
         `;
 
-        const data = (await shopifyClient.request(query, {
+        const data = (await ctx.client.request(query, {
           customerId: input.customerId,
           address: input.address,
           setAsDefault: input.setAsDefault,
@@ -125,7 +118,7 @@ const manageCustomerAddress = {
           }
         `;
 
-        const data = (await shopifyClient.request(query, {
+        const data = (await ctx.client.request(query, {
           customerId: input.customerId,
           addressId: input.addressId,
           address: input.address,
@@ -160,7 +153,7 @@ const manageCustomerAddress = {
           }
         `;
 
-        const data = (await shopifyClient.request(query, {
+        const data = (await ctx.client.request(query, {
           customerId: input.customerId,
           addressId: input.addressId,
         })) as {

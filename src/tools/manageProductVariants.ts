@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { checkUserErrors, handleToolError } from "../lib/toolUtils.js";
+import { checkUserErrors, handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 // Input schema for manageProductVariants
 const VariantOptionSchema = z.object({
@@ -35,20 +34,13 @@ const ManageProductVariantsInputSchema = z.object({
 
 type ManageProductVariantsInput = z.infer<typeof ManageProductVariantsInputSchema>;
 
-// Will be initialized in index.ts
-let shopifyClient: GraphQLClient;
-
 const manageProductVariants = {
   name: "manage-product-variants",
   description:
     "Create or update product variants. Omit variant id to create new, include id to update existing.",
   schema: ManageProductVariantsInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: ManageProductVariantsInput) => {
+  execute: async (input: ManageProductVariantsInput, ctx: StoreContext) => {
     try {
       const { productId, variants } = input;
 
@@ -117,7 +109,7 @@ const manageProductVariants = {
           return variant;
         });
 
-        const createData = (await shopifyClient.request(createQuery, {
+        const createData = (await ctx.client.request(createQuery, {
           productId,
           variants: createVariants,
           ...(input.strategy && { strategy: input.strategy }),
@@ -193,7 +185,7 @@ const manageProductVariants = {
           return variant;
         });
 
-        const updateData = (await shopifyClient.request(updateQuery, {
+        const updateData = (await ctx.client.request(updateQuery, {
           productId,
           variants: updateVariants,
         })) as {

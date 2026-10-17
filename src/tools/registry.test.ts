@@ -5,21 +5,22 @@
 // 4-arg form) and asserts descriptions and unique names.
 
 import { describe, expect, test } from "@jest/globals";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
+import { createShopifyMcpServer } from "../lib/registerTools.js";
+import type { StoreContext } from "../lib/toolUtils.js";
 import { tools } from "./registry.js";
+
+const singleContext: StoreContext = {
+  client: {} as StoreContext["client"],
+  domain: "example.myshopify.com",
+  storeKey: "example.myshopify.com",
+  getAccessToken: () => "token",
+  apiVersion: "2026-01",
+};
 
 describe("tool registry MCP registration", () => {
   test("registers 50 uniquely named tools with non-empty descriptions", () => {
-    const server = new McpServer({ name: "t", version: "0" });
-    for (const tool of tools) {
-      server.tool(tool.name, tool.description, tool.schema.shape, async (args) => {
-        const result = await tool.execute(args);
-        return {
-          content: [{ type: "text", text: JSON.stringify(result) }],
-        };
-      });
-    }
+    const server = createShopifyMcpServer({ mode: "single", context: singleContext });
 
     const registered = (server as unknown as {
       _registeredTools: Record<string, { description?: string }>;

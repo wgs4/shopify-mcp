@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { checkUserErrors, handleToolError } from "../lib/toolUtils.js";
+import { checkUserErrors, handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 const OrderCancelInputSchema = z.object({
   orderId: z.string().describe("The order GID, e.g. gid://shopify/Order/123"),
@@ -14,19 +13,13 @@ const OrderCancelInputSchema = z.object({
 
 type OrderCancelInput = z.infer<typeof OrderCancelInputSchema>;
 
-let shopifyClient: GraphQLClient;
-
 const orderCancel = {
   name: "order-cancel",
   description:
     "Cancel an order with options for refunding, restocking inventory, and customer notification. Cancellation is irreversible.",
   schema: OrderCancelInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: OrderCancelInput) => {
+  execute: async (input: OrderCancelInput, ctx: StoreContext) => {
     try {
       const query = gql`
         #graphql
@@ -74,7 +67,7 @@ const orderCancel = {
         };
       }
 
-      const data = (await shopifyClient.request(query, variables)) as {
+      const data = (await ctx.client.request(query, variables)) as {
         orderCancel: {
           job: { id: string; done: boolean } | null;
           orderCancelUserErrors: Array<{ field: string; message: string; code: string }>;

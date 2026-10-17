@@ -173,6 +173,22 @@ shopify-mcp --clientId=<ID> --clientSecret=<SECRET> --domain=<YOUR_SHOP>.myshopi
 
 **⚠️ Important:** If you see errors about "SHOPIFY_ACCESS_TOKEN environment variable is required" when using command-line arguments, you might have a different package installed. Make sure you're using `shopify-mcp`, not `shopify-mcp-server`.
 
+### Multiple stores in one process
+
+Set `SHOPIFY_STORES` to serve every store from one process. Each of the 50 tools then takes a required `store` argument (`wgs`, `allpedal`, and so on). There is no default. Leave `SHOPIFY_STORES` unset to keep today's single-store setup: the same tool schemas, with no `store` argument.
+
+```
+SHOPIFY_CLIENT_ID=shared_client_id
+SHOPIFY_CLIENT_SECRET=shared_client_secret
+SHOPIFY_STORES=wgs=wgsusa.myshopify.com,allpedal=allpedal.myshopify.com,amperian=amperian.myshopify.com,fortin=fortinamps.myshopify.com
+```
+
+Keys match `^[a-z][a-z0-9-]{0,31}$`. Domains must be `*.myshopify.com`. The same list can be passed as `--stores`.
+
+A store on a different app can override the shared credentials with `SHOPIFY_CLIENT_ID__<KEY>` and `SHOPIFY_CLIENT_SECRET__<KEY>`. The key is uppercased and hyphens become underscores, so `all-pedal` uses `SHOPIFY_CLIENT_ID__ALL_PEDAL` and `SHOPIFY_CLIENT_SECRET__ALL_PEDAL`.
+
+Each store's access token is fetched on first use and refreshed on its own. If one store fails to authenticate, that tool call returns an error naming the store. The other stores keep working.
+
 ## Available Tools (50)
 
 ### Pagination, Sorting & Filtering
