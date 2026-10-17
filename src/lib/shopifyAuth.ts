@@ -18,6 +18,17 @@ export interface ClientCredentialsConfig {
   shopDomain: string; // e.g. "my-store.myshopify.com"
 }
 
+export interface ShopifyAuthOptions {
+  /**
+   * Mirror the current token into process.env.SHOPIFY_ACCESS_TOKEN.
+   * Single-store mode keeps this on so a refresh still updates that env var.
+   * Multi-store mode turns it off: one process must not publish one store's token.
+   */
+  syncAccessTokenEnv?: boolean;
+  /** Test hook. Production uses global fetch. */
+  fetchImpl?: typeof fetch;
+}
+
 interface TokenResponse {
   access_token: string;
   expires_in: number;
@@ -33,9 +44,14 @@ export class ShopifyAuth {
   private expiresAt = 0;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private graphqlClient: GraphQLClient | null = null;
+  private inflight: Promise<string> | null = null;
+  private syncAccessTokenEnv: boolean;
+  private fetchImpl: typeof fetch;
 
-  constructor(config: ClientCredentialsConfig) {
+  constructor(config: ClientCredentialsConfig, options: ShopifyAuthOptions = {}) {
     this.config = config;
+    this.syncAccessTokenEnv = options.syncAccessTokenEnv !== false;
+    this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
   /** Attach the GraphQL client so the token can be hot-swapped on refresh. */
@@ -45,9 +61,28 @@ export class ShopifyAuth {
 
   /** Fetch an initial token. Must be called before the server starts. */
   async initialize(): Promise<string> {
-    await this.fetchToken();
-    this.scheduleRefresh();
-    return this.accessToken!;
+    return this.ensureAccessToken();
+  }
+
+  /**
+   * Return a valid token, fetching it on first use. Concurrent callers share
+   * one in-flight exchange. A failure rejects this call only; the next call
+   * tries again.
+   */
+  async ensureAccessToken(): Promise<string> {
+    if (this.accessToken && Date.now() < this.expiresAt - REFRESH_MARGIN_MS) {
+      return this.accessToken;
+    }
+    if (!this.inflight) {
+      this.inflight = (async () => {
+        await this.fetchToken();
+        this.scheduleRefresh();
+        return this.accessToken!;
+      })().finally(() => {
+        this.inflight = null;
+      });
+    }
+    return this.inflight;
   }
 
   /** Return the current (valid) access token. */
@@ -79,7 +114,7 @@ export class ShopifyAuth {
       client_secret: this.config.clientSecret,
     });
 
-    const res = await fetch(url, {
+    const res = await this.fetchImpl(url, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
@@ -88,7 +123,7 @@ export class ShopifyAuth {
     if (!res.ok) {
       const text = await res.text();
       throw new Error(
-        `Shopify token exchange failed (${res.status}): ${text}`
+        `Shopify token exchange failed (${res.status})${tokenErrorDetail(text, this.config)}`,
       );
     }
 
@@ -105,31 +140,67 @@ export class ShopifyAuth {
       );
     }
 
-    // Keep process.env in sync for code paths that fetch directly (e.g. the
-    // REST balance/transactions endpoint used by the payout loader). Without
-    // this, long-running MCPs would have a fresh GraphQL client but stale env
-    // 24h after startup.
-    process.env.SHOPIFY_ACCESS_TOKEN = this.accessToken;
+    // Single-store mode still mirrors the token into the env var on refresh.
+    // Multi-store mode leaves the env alone so stores cannot overwrite each other.
+    if (this.syncAccessTokenEnv) {
+      process.env.SHOPIFY_ACCESS_TOKEN = this.accessToken;
+    }
   }
 
   private scheduleRefresh(): void {
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = null;
+    }
     const msUntilRefresh = this.expiresAt - Date.now() - REFRESH_MARGIN_MS;
     const delay = Math.max(msUntilRefresh, 0);
 
-    this.refreshTimer = setTimeout(async () => {
-      try {
-        await this.fetchToken();
-        this.scheduleRefresh();
-      } catch (err) {
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = null;
+      this.ensureAccessToken().catch((err) => {
         console.error("Failed to refresh Shopify access token:", err);
         // Retry in 60 s rather than dying.
-        this.refreshTimer = setTimeout(() => this.scheduleRefresh(), 60_000);
-      }
+        this.refreshTimer = setTimeout(() => {
+          this.refreshTimer = null;
+          this.scheduleRefresh();
+        }, 60_000);
+        unrefTimer(this.refreshTimer);
+      });
     }, delay);
 
-    // Allow the Node process to exit even if the timer is pending.
-    if (this.refreshTimer && typeof this.refreshTimer === "object" && "unref" in this.refreshTimer) {
-      this.refreshTimer.unref();
-    }
+    unrefTimer(this.refreshTimer);
   }
+}
+
+function unrefTimer(timer: ReturnType<typeof setTimeout> | null): void {
+  if (timer && typeof timer === "object" && "unref" in timer) {
+    timer.unref();
+  }
+}
+
+function redactSecrets(text: string, config: ClientCredentialsConfig): string {
+  return text
+    .split(config.clientSecret).join("[redacted]")
+    .split(config.clientId).join("[redacted]")
+    .replace(/shpat_[A-Za-z0-9]+/g, "[redacted]")
+    .replace(/shpss_[A-Za-z0-9]+/g, "[redacted]");
+}
+
+/** Pull Shopify's error fields only. Never echo the raw body or a token. */
+function tokenErrorDetail(text: string, config: ClientCredentialsConfig): string {
+  let detail = "";
+  try {
+    const parsed = JSON.parse(text) as {
+      error?: unknown;
+      error_description?: unknown;
+    };
+    const parts = [parsed.error, parsed.error_description].filter(
+      (part): part is string => typeof part === "string" && part.length > 0,
+    );
+    detail = parts.join(": ");
+  } catch {
+    detail = "";
+  }
+  detail = redactSecrets(detail, config).slice(0, 200);
+  return detail ? `: ${detail}` : "";
 }
