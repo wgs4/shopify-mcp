@@ -157,7 +157,14 @@ export class ShopifyAuth {
 
     this.refreshTimer = setTimeout(() => {
       this.refreshTimer = null;
-      this.ensureAccessToken().catch((err) => {
+      this.ensureAccessToken().then(() => {
+        // A fetch re-arms the timer itself. If the clock stepped back, the
+        // cached token still looks fresh and nothing re-armed it; do it here,
+        // or refresh stops for good and single-store calls go stale.
+        if (!this.refreshTimer) {
+          this.scheduleRefresh();
+        }
+      }).catch((err) => {
         console.error("Failed to refresh Shopify access token:", err);
         // Retry in 60 s rather than dying.
         this.refreshTimer = setTimeout(() => {
