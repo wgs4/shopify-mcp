@@ -47,6 +47,10 @@
 // reverting to the pre-gate behavior (idle kill unmodified). It fails toward
 // MORE protection.
 //
+// Env hatch: MCP_SHARED_MUX_CHILD=1 -> skip ONLY the idle-timeout exit. Set by
+// mcp-mux on its one shared child. Absent (or any other value) leaves the idle
+// kill on.
+//
 // Limitations (documented, not bugs):
 //
 //   - No PR_SET_PDEATHSIG. The Python reference uses prctl on Linux for
@@ -158,6 +162,18 @@ export function _resetForTest(): void {
 }
 
 /**
+ * True when this process is mcp-mux's one shared child.
+ *
+ * Under mcp-mux a single long-lived process serves every client, so the
+ * per-session idle-timeout exit is wrong -- it would kill the shared server
+ * every quiet 30 minutes. mcp-mux sets MCP_SHARED_MUX_CHILD=1 to mark that
+ * child. Read at call time, never cached.
+ */
+export function sharedMuxChild(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.MCP_SHARED_MUX_CHILD === "1";
+}
+
+/**
  * Pure: should the watchdog terminate the process right now?
  *
  * Exits when reparented to init (ppid == 1, i.e. parent sshd died) OR when
@@ -177,9 +193,13 @@ export function shouldWatchdogExit(args: {
   nowMs: number;
   idleTimeoutMs: number;
   transportAlive?: boolean;
+  env?: NodeJS.ProcessEnv;
 }): { exit: boolean; reason?: string } {
   if (args.ppid === 1) {
     return { exit: true, reason: "parent died (reparented to init, ppid=1)" };
+  }
+  if (sharedMuxChild(args.env)) {
+    return { exit: false }; // skip ONLY the idle path
   }
   const idleMs = args.nowMs - args.lastActivityMs;
   if (idleMs > args.idleTimeoutMs && !args.transportAlive) {
@@ -545,6 +565,16 @@ export function startLifecycleWatchdog(): void {
   }
   lastActivityMs = performance.now();
   const idleTimeoutS = resolveIdleTimeoutSeconds();
+
+  // Skip the idle-timeout exit under the shared mux: mcp-mux runs ONE shared
+  // child per server and sets MCP_SHARED_MUX_CHILD=1 to mark it. The idle exit
+  // would kill that shared child every quiet 30 minutes. The orphan (ppid==1)
+  // exit stays as is.
+  if (sharedMuxChild()) {
+    console.error(
+      "watchdog: idle kill disabled because this process runs under the shared mux"
+    );
+  }
 
   // Mechanism 3: resolve the transport-liveness gate's peer ONCE at startup.
   // Inactive unless the gate is enabled AND SSH_CONNECTION parses -- both

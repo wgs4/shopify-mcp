@@ -24,6 +24,7 @@ import {
   normalizeSsIp,
   parseSsBytesReceived,
   readSshBytesReceived,
+  sharedMuxChild,
   _TRANSPORT_FRESH_WINDOW_MS,
   type ActivityHookableTransport,
   type SsRunner,
@@ -35,6 +36,7 @@ afterEach(() => {
   delete process.env.MCP_DISABLE_WATCHDOG;
   delete process.env.MCP_TRANSPORT_LIVENESS;
   delete process.env.SSH_CONNECTION;
+  delete process.env.MCP_SHARED_MUX_CHILD;
 });
 
 // The real `ss -tin` sample captured on the prod VM (Ubuntu). Two ESTAB
@@ -516,5 +518,80 @@ describe("startLifecycleWatchdog", () => {
     startLifecycleWatchdog();
     expect(setIntervalSpy).toHaveBeenCalledTimes(1);
     setIntervalSpy.mockRestore();
+  });
+});
+
+describe("sharedMuxChild", () => {
+  test("true only for exact '1'", () => {
+    expect(sharedMuxChild({ MCP_SHARED_MUX_CHILD: "1" })).toBe(true);
+    expect(sharedMuxChild({ MCP_SHARED_MUX_CHILD: "0" })).toBe(false);
+    expect(sharedMuxChild({ MCP_SHARED_MUX_CHILD: "true" })).toBe(false);
+    expect(sharedMuxChild({ MCP_SHARED_MUX_CHILD: "" })).toBe(false);
+    expect(sharedMuxChild({})).toBe(false);
+  });
+});
+
+describe("shouldWatchdogExit with MCP_SHARED_MUX_CHILD", () => {
+  test("marker skips the idle exit", () => {
+    const r = shouldWatchdogExit({
+      ppid: 4242,
+      lastActivityMs: 0,
+      nowMs: 1_801_000,
+      idleTimeoutMs: 1_800_000,
+      env: { MCP_SHARED_MUX_CHILD: "1" },
+    });
+    expect(r.exit).toBe(false);
+  });
+
+  test("marker still kills on parent death (ppid==1)", () => {
+    const r = shouldWatchdogExit({
+      ppid: 1,
+      lastActivityMs: 1_000_000,
+      nowMs: 1_000_000,
+      idleTimeoutMs: 1_800_000,
+      env: { MCP_SHARED_MUX_CHILD: "1" },
+    });
+    expect(r.exit).toBe(true);
+    expect(r.reason).toMatch(/parent died/);
+  });
+
+  test.each([undefined, "0", "true"])(
+    "idle exit still fires when marker is %j",
+    (val) => {
+      const env = val === undefined ? {} : { MCP_SHARED_MUX_CHILD: val };
+      const r = shouldWatchdogExit({
+        ppid: 4242,
+        lastActivityMs: 0,
+        nowMs: 1_801_000,
+        idleTimeoutMs: 1_800_000,
+        env,
+      });
+      expect(r.exit).toBe(true);
+    }
+  );
+});
+
+describe("startLifecycleWatchdog shared-mux log", () => {
+  test("logs the disabled line only with the marker", () => {
+    const errSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    _resetForTest();
+    process.env.MCP_SHARED_MUX_CHILD = "1";
+    startLifecycleWatchdog();
+    expect(
+      errSpy.mock.calls.some((c) => String(c[0]).includes("idle kill disabled"))
+    ).toBe(true);
+    errSpy.mockRestore();
+    _resetForTest();
+
+    delete process.env.MCP_SHARED_MUX_CHILD;
+    const errSpy2 = jest.spyOn(console, "error").mockImplementation(() => {});
+    startLifecycleWatchdog();
+    expect(
+      errSpy2.mock.calls.some((c) =>
+        String(c[0]).includes("idle kill disabled")
+      )
+    ).toBe(false);
+    errSpy2.mockRestore();
+    _resetForTest();
   });
 });
