@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { checkUserErrors, handleToolError } from "../lib/toolUtils.js";
+import { checkUserErrors, handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 const SetInventoryQuantitiesInputSchema = z.object({
   reason: z.string().describe("Reason for the quantity change (e.g. 'correction', 'cycle_count_available', 'received')"),
@@ -21,19 +20,13 @@ const SetInventoryQuantitiesInputSchema = z.object({
 
 type SetInventoryQuantitiesInput = z.infer<typeof SetInventoryQuantitiesInputSchema>;
 
-let shopifyClient: GraphQLClient;
-
 const setInventoryQuantities = {
   name: "inventory-set-quantities",
   description:
     "Set absolute inventory quantities for items at specific locations. Use for inventory corrections, cycle counts, etc.",
   schema: SetInventoryQuantitiesInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: SetInventoryQuantitiesInput) => {
+  execute: async (input: SetInventoryQuantitiesInput, ctx: StoreContext) => {
     try {
       const query = gql`
         #graphql
@@ -65,7 +58,7 @@ const setInventoryQuantities = {
         }
       `;
 
-      const data = (await shopifyClient.request(query, {
+      const data = (await ctx.client.request(query, {
         input: {
           reason: input.reason,
           name: input.name,

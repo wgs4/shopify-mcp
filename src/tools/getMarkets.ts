@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { edgesToNodes, handleToolError } from "../lib/toolUtils.js";
+import { edgesToNodes, handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 const GetMarketsInputSchema = z.object({
   first: z
@@ -14,19 +13,13 @@ const GetMarketsInputSchema = z.object({
 });
 type GetMarketsInput = z.infer<typeof GetMarketsInputSchema>;
 
-let shopifyClient: GraphQLClient;
-
 const getMarkets = {
   name: "get-markets",
   description:
     "Get all markets with their regions, currencies, status, and web presence configuration",
   schema: GetMarketsInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: GetMarketsInput) => {
+  execute: async (input: GetMarketsInput, ctx: StoreContext) => {
     try {
       const query = gql`
         #graphql
@@ -81,7 +74,7 @@ const getMarkets = {
         first: input.first ?? 25,
       };
 
-      const data: any = await shopifyClient.request(query, variables);
+      const data: any = await ctx.client.request(query, variables);
       const markets = edgesToNodes(data.markets).map((market: any) => ({
         ...market,
         webPresences: market.webPresences

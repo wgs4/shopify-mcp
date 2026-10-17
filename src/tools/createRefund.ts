@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { checkUserErrors, handleToolError } from "../lib/toolUtils.js";
+import { checkUserErrors, handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 const CreateRefundInputSchema = z.object({
   orderId: z.string().describe("The order GID, e.g. gid://shopify/Order/123"),
@@ -33,19 +32,13 @@ const CreateRefundInputSchema = z.object({
 
 type CreateRefundInput = z.infer<typeof CreateRefundInputSchema>;
 
-let shopifyClient: GraphQLClient;
-
 const createRefund = {
   name: "refund-create",
   description:
     "Create a full or partial refund for an order with optional restocking and shipping refund.",
   schema: CreateRefundInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: CreateRefundInput) => {
+  execute: async (input: CreateRefundInput, ctx: StoreContext) => {
     try {
       const query = gql`
         #graphql
@@ -103,7 +96,7 @@ const createRefund = {
         refundInput.currency = input.currency;
       }
 
-      const data = (await shopifyClient.request(query, { input: refundInput })) as {
+      const data = (await ctx.client.request(query, { input: refundInput })) as {
         refundCreate: {
           refund: any;
           userErrors: Array<{ field: string; message: string }>;

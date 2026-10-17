@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { edgesToNodes, handleToolError } from "../lib/toolUtils.js";
+import { edgesToNodes, handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 const GetPriceListsInputSchema = z.object({
   first: z
@@ -14,19 +13,13 @@ const GetPriceListsInputSchema = z.object({
 });
 type GetPriceListsInput = z.infer<typeof GetPriceListsInputSchema>;
 
-let shopifyClient: GraphQLClient;
-
 const getPriceLists = {
   name: "get-price-lists",
   description:
     "Get all price lists with their currency, fixed/relative adjustments, and associated catalog context",
   schema: GetPriceListsInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: GetPriceListsInput) => {
+  execute: async (input: GetPriceListsInput, ctx: StoreContext) => {
     try {
       const query = gql`
         #graphql
@@ -84,7 +77,7 @@ const getPriceLists = {
         first: input.first ?? 25,
       };
 
-      const data: any = await shopifyClient.request(query, variables);
+      const data: any = await ctx.client.request(query, variables);
       const priceLists = edgesToNodes(data.priceLists).map(
         (priceList: any) => ({
           ...priceList,

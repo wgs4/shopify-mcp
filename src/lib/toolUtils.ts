@@ -47,8 +47,7 @@ export interface ShopifyTool {
   name: string;
   description: string;
   schema: z.ZodObject<z.ZodRawShape>;
-  initialize(client: GraphQLClient): void;
-  execute(args: Record<string, unknown>): Promise<unknown>;
+  execute(args: Record<string, unknown>, ctx: StoreContext): Promise<unknown>;
 }
 
 // ── Utility functions ─────────────────────────────────────────────────

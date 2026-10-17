@@ -93,7 +93,12 @@ export interface FetchBalanceTransactionsResult {
   has_next_page: boolean;
 }
 
-const DEFAULT_API_VERSION = "2026-01";
+export interface BalanceTransactionsAuth {
+  domain: string;
+  apiVersion: string;
+  /** Called on every REST page so a refreshed token is picked up immediately. */
+  getAccessToken: () => string;
+}
 
 /**
  * Walk REST balance_transactions pages until the Link header has no `rel="next"`,
@@ -102,6 +107,7 @@ const DEFAULT_API_VERSION = "2026-01";
 export async function fetchBalanceTransactions(
   graphqlClient: GraphQLClient,
   opts: FetchBalanceTransactionsOptions,
+  auth: BalanceTransactionsAuth,
 ): Promise<FetchBalanceTransactionsResult> {
   if (opts.maxTransactions <= 0) {
     throw new Error("maxTransactions must be > 0");
@@ -110,24 +116,17 @@ export async function fetchBalanceTransactions(
     throw new Error("pageSize must be > 0");
   }
 
-  const domain = process.env.MYSHOPIFY_DOMAIN;
-  if (!domain) {
-    throw new Error(
-      "MYSHOPIFY_DOMAIN environment variable is not set — cannot build REST URL",
-    );
+  if (!auth.domain) {
+    throw new Error("Store domain is not set — cannot build REST URL");
   }
-  const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
-  if (!accessToken) {
-    throw new Error(
-      "SHOPIFY_ACCESS_TOKEN environment variable is not set — auth not initialized",
-    );
+  if (!auth.apiVersion) {
+    throw new Error("Store API version is not set — cannot build REST URL");
   }
-  const apiVersion = process.env.SHOPIFY_API_VERSION ?? DEFAULT_API_VERSION;
 
   const transactions: NormalizedBalanceTxn[] = [];
   let nextUrl: string | null = buildInitialUrl({
-    domain,
-    apiVersion,
+    domain: auth.domain,
+    apiVersion: auth.apiVersion,
     legacyPayoutId: opts.legacyPayoutId,
     pageSize: opts.pageSize,
     startCursor: opts.startCursor,
@@ -163,6 +162,10 @@ export async function fetchBalanceTransactions(
     // own size; trimming `limit` smaller than the original is supported.
     const effectiveUrl = applyLimit(nextUrl, Math.min(opts.pageSize, remaining));
 
+    const accessToken = auth.getAccessToken();
+    if (!accessToken) {
+      throw new Error("Store access token is empty — auth not initialized");
+    }
     const res = await fetch(effectiveUrl, {
       headers: {
         "X-Shopify-Access-Token": accessToken,

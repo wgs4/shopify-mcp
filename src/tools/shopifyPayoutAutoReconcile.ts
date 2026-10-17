@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { handleToolError, type ShopifyConnection } from "../lib/toolUtils.js";
+import { handleToolError, type ShopifyConnection, type StoreContext } from "../lib/toolUtils.js";
 import {
   buildPayoutListQuery,
   computeBreakdownTotals,
@@ -103,8 +102,6 @@ type ShopifyPayoutAutoReconcileInput = z.infer<
   typeof ShopifyPayoutAutoReconcileInputSchema
 >;
 
-let shopifyClient: GraphQLClient;
-
 function todayIsoDate(): string {
   return new Date().toISOString().slice(0, 10);
 }
@@ -195,13 +192,9 @@ const shopifyPayoutAutoReconcile = {
     "Requires the `read_shopify_payments_payouts` and `read_shopify_payments_accounts` Custom App scopes.",
   schema: ShopifyPayoutAutoReconcileInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: ShopifyPayoutAutoReconcileInput) => {
+  execute: async (input: ShopifyPayoutAutoReconcileInput, ctx: StoreContext) => {
     try {
-      const shopDomain = process.env.MYSHOPIFY_DOMAIN ?? "";
+      const shopDomain = ctx.domain;
       const until = input.until ?? todayIsoDate();
       const queryStr = buildPayoutListQuery({
         since: input.since,
@@ -215,7 +208,7 @@ const shopifyPayoutAutoReconcile = {
         } | null;
       };
       try {
-        payoutsData = (await shopifyClient.request(PAYOUTS_QUERY, {
+        payoutsData = (await ctx.client.request(PAYOUTS_QUERY, {
           first: input.limit,
           ...(queryStr ? { query: queryStr } : {}),
         })) as typeof payoutsData;
@@ -306,13 +299,17 @@ const shopifyPayoutAutoReconcile = {
 
             let loaderResult;
             try {
-              loaderResult = await fetchBalanceTransactions(shopifyClient, {
-                legacyPayoutId: payout.legacy_resource_id,
-                pageSize: input.transactions_limit,
-                maxTransactions: effectivePerPayoutCap,
-                autoPaginate: input.auto_paginate_transactions,
-                includeOrderNames: input.include_order_names,
-              });
+              loaderResult = await fetchBalanceTransactions(
+                ctx.client,
+                {
+                  legacyPayoutId: payout.legacy_resource_id,
+                  pageSize: input.transactions_limit,
+                  maxTransactions: effectivePerPayoutCap,
+                  autoPaginate: input.auto_paginate_transactions,
+                  includeOrderNames: input.include_order_names,
+                },
+                ctx,
+              );
             } catch (err) {
               throw explainPayoutAccessError(err);
             }

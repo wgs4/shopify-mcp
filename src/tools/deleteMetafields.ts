@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { checkUserErrors, handleToolError } from "../lib/toolUtils.js";
+import { checkUserErrors, handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 const DeleteMetafieldsInputSchema = z.object({
   metafields: z
@@ -18,19 +17,13 @@ const DeleteMetafieldsInputSchema = z.object({
 
 type DeleteMetafieldsInput = z.infer<typeof DeleteMetafieldsInputSchema>;
 
-let shopifyClient: GraphQLClient;
-
 const deleteMetafields = {
   name: "delete-metafields",
   description:
     "Delete metafields from any Shopify resource by specifying owner ID, namespace, and key.",
   schema: DeleteMetafieldsInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: DeleteMetafieldsInput) => {
+  execute: async (input: DeleteMetafieldsInput, ctx: StoreContext) => {
     try {
       const query = gql`
         #graphql
@@ -50,7 +43,7 @@ const deleteMetafields = {
         }
       `;
 
-      const data = (await shopifyClient.request(query, {
+      const data = (await ctx.client.request(query, {
         metafields: input.metafields,
       })) as {
         metafieldsDelete: {

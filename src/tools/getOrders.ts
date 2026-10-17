@@ -1,4 +1,3 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
 import { getAccessScopes } from "../lib/accessScopes.js";
@@ -8,7 +7,7 @@ import {
   getShopTimezone,
 } from "../lib/orderHistoryFetch.js";
 import { guardOrderQuery } from "../lib/orderWall.js";
-import { handleToolError, edgesToNodes, type ShopifyConnection } from "../lib/toolUtils.js";
+import { handleToolError, edgesToNodes, type ShopifyConnection, type StoreContext } from "../lib/toolUtils.js";
 
 // Input schema for getOrders
 const GetOrdersInputSchema = z.object({
@@ -33,20 +32,12 @@ const GetOrdersInputSchema = z.object({
 
 type GetOrdersInput = z.infer<typeof GetOrdersInputSchema>;
 
-// Will be initialized in index.ts
-let shopifyClient: GraphQLClient;
-
 const getOrders = {
   name: "get-orders",
   description: "Get orders with optional filtering by status",
   schema: GetOrdersInputSchema,
 
-  // Add initialize method to set up the GraphQL client
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: GetOrdersInput) => {
+  execute: async (input: GetOrdersInput, ctx: StoreContext) => {
     try {
       const { status, limit, after, before, sortKey, reverse, query: rawQuery } = input;
 
@@ -60,11 +51,11 @@ const getOrders = {
       }
       const queryFilter = queryParts.join(" ") || undefined;
 
-      const scopes = await getAccessScopes(shopifyClient);
-      const tz = await getShopTimezone(shopifyClient);
+      const scopes = await getAccessScopes(ctx.client);
+      const tz = await getShopTimezone(ctx.client);
       const horizon = guardOrderQuery({ scopes, query: queryFilter, tz });
       horizon.oldest_visible_order_created_at =
-        await getOldestVisibleOrderCreatedAt(shopifyClient);
+        await getOldestVisibleOrderCreatedAt(ctx.client);
 
       const query = gql`
         #graphql
@@ -162,12 +153,14 @@ const getOrders = {
         ...(reverse !== undefined && { reverse })
       };
 
-      const data = (await shopifyClient.request(query, variables)) as {
+      const data = (await ctx.client.request(query, variables)) as {
         orders: ShopifyConnection<any>;
       };
 
       // Extract and format order data
-      const orders = edgesToNodes(data.orders).map(formatOrderSummary);
+      const orders = edgesToNodes(data.orders).map((order) =>
+        formatOrderSummary(order, ctx.domain),
+      );
 
       return {
         orders,

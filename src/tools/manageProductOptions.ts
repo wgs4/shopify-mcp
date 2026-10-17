@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { checkUserErrors, handleToolError } from "../lib/toolUtils.js";
+import { checkUserErrors, handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 // Input schema for manageProductOptions
 const ManageProductOptionsInputSchema = z.object({
@@ -46,9 +45,6 @@ const ManageProductOptionsInputSchema = z.object({
 
 type ManageProductOptionsInput = z.infer<typeof ManageProductOptionsInputSchema>;
 
-// Will be initialized in index.ts
-let shopifyClient: GraphQLClient;
-
 type MutationResponse = {
   product: any;
   userErrors: Array<{ field: string; message: string; code?: string }>;
@@ -60,11 +56,7 @@ const manageProductOptions = {
     "Create, update, or delete product options (e.g. Size, Color). Use action='create' to add options, 'update' to rename or add/remove values, 'delete' to remove options.",
   schema: ManageProductOptionsInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: ManageProductOptionsInput) => {
+  execute: async (input: ManageProductOptionsInput, ctx: StoreContext) => {
     try {
       const { productId, action } = input;
 
@@ -134,7 +126,7 @@ const manageProductOptions = {
           }),
         }));
 
-        const data = (await shopifyClient.request(query, {
+        const data = (await ctx.client.request(query, {
           productId,
           options,
           variantStrategy: input.variantStrategy || "LEAVE_AS_IS",
@@ -219,7 +211,7 @@ const manageProductOptions = {
           variables.optionValuesToDelete = input.valuesToDelete;
         }
 
-        const data = (await shopifyClient.request(
+        const data = (await ctx.client.request(
           query,
           variables
         )) as { productOptionUpdate: MutationResponse };
@@ -285,7 +277,7 @@ const manageProductOptions = {
           }
         `;
 
-        const data = (await shopifyClient.request(query, {
+        const data = (await ctx.client.request(query, {
           productId,
           options: input.optionIds,
         })) as { productOptionsDelete: MutationResponse };

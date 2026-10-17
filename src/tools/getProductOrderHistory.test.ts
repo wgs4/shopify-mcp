@@ -15,7 +15,21 @@ import { computeHorizon, ScopeHorizonError } from "../lib/orderWall.js";
 import { getCustomerOrders } from "./getCustomerOrders.js";
 import { getOrderById } from "./getOrderById.js";
 import { getOrders } from "./getOrders.js";
+import type { StoreContext } from "../lib/toolUtils.js";
 import { getProductOrderHistory } from "./getProductOrderHistory.js";
+
+function toolCtx(
+  client: GraphQLClient,
+  domain = "all-pedal.myshopify.com",
+): StoreContext {
+  return {
+    client,
+    domain,
+    storeKey: "allpedal",
+    getAccessToken: () => "test-token",
+    apiVersion: "2026-01",
+  };
+}
 
 afterEach(() => {
   resetScopes();
@@ -211,27 +225,29 @@ async function run(
   args: Record<string, unknown>,
   handles: string[],
   scriptOpts?: Parameters<typeof scriptClient>[1],
-  deps?: Parameters<typeof getProductOrderHistory.execute>[1],
+  deps?: Parameters<typeof getProductOrderHistory.execute>[2],
 ) {
   const scripted = scriptClient(handles, scriptOpts);
-  getProductOrderHistory.initialize(scripted.client);
-  process.env.MYSHOPIFY_DOMAIN = "all-pedal.myshopify.com";
-  const result = await getProductOrderHistory.execute(args, deps);
+  process.env.MYSHOPIFY_DOMAIN = "env-ignored.myshopify.com";
+  const result = await getProductOrderHistory.execute(
+    args,
+    toolCtx(scripted.client),
+    deps,
+  );
   return { result: result as Record<string, unknown>, ...scripted };
 }
 
 describe("get-product-order-history validation", () => {
   test("rejects neither skus nor productId, both, bad dates, until < since", async () => {
     const { client } = fakeClient();
-    getProductOrderHistory.initialize(client);
 
     await expect(
       getProductOrderHistory.execute({
         since: "2026-07-05",
         until: "2026-09-03",
-      }),
+      }, toolCtx(client)),
     ).rejects.toThrow(/exactly one of skus or productId/);
-    await expect(getProductOrderHistory.execute({})).rejects.toThrow(
+    await expect(getProductOrderHistory.execute({}, toolCtx(client))).rejects.toThrow(
       /Required/,
     );
     await expect(
@@ -240,28 +256,28 @@ describe("get-product-order-history validation", () => {
         productId: "gid://shopify/Product/1",
         since: "2026-07-05",
         until: "2026-09-03",
-      }),
+      }, toolCtx(client)),
     ).rejects.toThrow(/exactly one of skus or productId/);
     await expect(
       getProductOrderHistory.execute({
         skus: [MATCHING_SKU],
         since: "2026-13-40",
         until: "2026-09-03",
-      }),
+      }, toolCtx(client)),
     ).rejects.toThrow(/since must be a valid YYYY-MM-DD/);
     await expect(
       getProductOrderHistory.execute({
         skus: [MATCHING_SKU],
         since: "2026-07-05",
         until: "nope",
-      }),
+      }, toolCtx(client)),
     ).rejects.toThrow(/until must be a valid YYYY-MM-DD/);
     await expect(
       getProductOrderHistory.execute({
         skus: [MATCHING_SKU],
         since: "2026-09-03",
         until: "2026-07-05",
-      }),
+      }, toolCtx(client)),
     ).rejects.toThrow(/until must be >= since/);
   });
 });
@@ -269,13 +285,12 @@ describe("get-product-order-history validation", () => {
 describe("60-day wall", () => {
   test("no scope + 2024 window throws unwrapped ScopeHorizonError", async () => {
     const scripted = scriptClient(["read_orders"]);
-    getProductOrderHistory.initialize(scripted.client);
     try {
       await getProductOrderHistory.execute({
         skus: [MATCHING_SKU],
         since: "2024-01-01",
         until: "2024-12-31",
-      });
+      }, toolCtx(scripted.client));
       throw new Error("expected ScopeHorizonError");
     } catch (err) {
       expect(err).toBeInstanceOf(ScopeHorizonError);
@@ -287,7 +302,6 @@ describe("60-day wall", () => {
 
   test("no scope + window inside horizon throws visibility_indeterminate", async () => {
     const scripted = scriptClient(["read_orders"]);
-    getProductOrderHistory.initialize(scripted.client);
     const until = new Date().toISOString().slice(0, 10);
     const sinceMs = Date.now() - 7 * 86_400_000;
     const since = new Date(sinceMs).toISOString().slice(0, 10);
@@ -296,7 +310,7 @@ describe("60-day wall", () => {
         skus: [MATCHING_SKU],
         since,
         until,
-      });
+      }, toolCtx(scripted.client));
       throw new Error("expected ScopeHorizonError");
     } catch (err) {
       expect(err).toBeInstanceOf(ScopeHorizonError);
@@ -508,10 +522,9 @@ describe("cursor and bulk counting", () => {
       throw new BulkOperationError("TIMEOUT", "too slow", "gid://shopify/BulkOperation/1");
     });
     const scripted = scriptClient(["read_orders", "read_all_orders"]);
-    getProductOrderHistory.initialize(scripted.client);
     try {
       await getProductOrderHistory.execute(
-        { ...windowArgs, force_bulk: true },
+        { ...windowArgs, force_bulk: true }, toolCtx(scripted.client),
         { runBulkQuery, sleep: async () => {} },
       );
       throw new Error("expected BulkOperationError");
@@ -531,9 +544,7 @@ describe("scope-gated fragments and errors", () => {
 
   test("returns fragment present only with read_returns", async () => {
     const without = scriptClient(["read_orders", "read_all_orders"]);
-    getProductOrderHistory.initialize(without.client);
-    process.env.MYSHOPIFY_DOMAIN = "all-pedal.myshopify.com";
-    await getProductOrderHistory.execute(windowArgs);
+    await getProductOrderHistory.execute(windowArgs, toolCtx(without.client));
     const withoutDoc = String(
       without.rawRequest.mock.calls.find((c) => opName(c[0]) .startsWith("OrderHistoryDetails"))?.[0],
     );
@@ -544,8 +555,7 @@ describe("scope-gated fragments and errors", () => {
       "read_all_orders",
       "read_returns",
     ]);
-    getProductOrderHistory.initialize(withReturns.client);
-    await getProductOrderHistory.execute(windowArgs);
+    await getProductOrderHistory.execute(windowArgs, toolCtx(withReturns.client));
     const withDoc = String(
       withReturns.rawRequest.mock.calls.find((c) => opName(c[0]) .startsWith("OrderHistoryDetails"))?.[0],
     );
@@ -559,9 +569,7 @@ describe("scope-gated fragments and errors", () => {
       "read_all_orders",
       "read_merchant_managed_fulfillment_orders",
     ]);
-    getProductOrderHistory.initialize(partial.client);
-    process.env.MYSHOPIFY_DOMAIN = "all-pedal.myshopify.com";
-    await getProductOrderHistory.execute(windowArgs);
+    await getProductOrderHistory.execute(windowArgs, toolCtx(partial.client));
     const partialDoc = String(
       partial.rawRequest.mock.calls.find((c) => opName(c[0]) .startsWith("OrderHistoryDetails"))?.[0],
     );
@@ -572,8 +580,7 @@ describe("scope-gated fragments and errors", () => {
       "read_all_orders",
       ...FO_DETAIL_SCOPES,
     ]);
-    getProductOrderHistory.initialize(full.client);
-    await getProductOrderHistory.execute(windowArgs);
+    await getProductOrderHistory.execute(windowArgs, toolCtx(full.client));
     const fullDoc = String(
       full.rawRequest.mock.calls.find((c) => opName(c[0]) .startsWith("OrderHistoryDetails"))?.[0],
     );
@@ -619,9 +626,7 @@ describe("scope-gated fragments and errors", () => {
       }
       throw new Error(name);
     });
-    getProductOrderHistory.initialize(client);
-    process.env.MYSHOPIFY_DOMAIN = "all-pedal.myshopify.com";
-    await expect(getProductOrderHistory.execute(windowArgs)).rejects.toThrow(
+    await expect(getProductOrderHistory.execute(windowArgs, toolCtx(client))).rejects.toThrow(
       /more nested records than one page/,
     );
     void request;
@@ -654,10 +659,8 @@ describe("scope-gated fragments and errors", () => {
       };
       throw err;
     });
-    getProductOrderHistory.initialize(client);
-    process.env.MYSHOPIFY_DOMAIN = "all-pedal.myshopify.com";
     try {
-      await getProductOrderHistory.execute(windowArgs);
+      await getProductOrderHistory.execute(windowArgs, toolCtx(client));
       throw new Error("expected MissingScopeError");
     } catch (err) {
       expect((err as Error).name).toBe("MissingScopeError");
@@ -782,30 +785,27 @@ describe("oldest_visible_order_created_at on order tools", () => {
   test("get-orders / get-customer-orders / get-order-by-id attach the probe; cache hits within TTL", async () => {
     const { client, request } = orderToolClient();
 
-    getOrders.initialize(client);
     const listed = (await getOrders.execute({
       status: "any",
       limit: 10,
-    })) as {
+    }, toolCtx(client))) as {
       horizon: { oldest_visible_order_created_at: string | null };
     };
     expect(listed.horizon.oldest_visible_order_created_at).toBe(
       "2026-07-10T12:00:00Z",
     );
 
-    getCustomerOrders.initialize(client);
     const customer = (await getCustomerOrders.execute({
       customerId: "1",
       limit: 10,
-    })) as { horizon: { oldest_visible_order_created_at: string | null } };
+    }, toolCtx(client))) as { horizon: { oldest_visible_order_created_at: string | null } };
     expect(customer.horizon.oldest_visible_order_created_at).toBe(
       "2026-07-10T12:00:00Z",
     );
 
-    getOrderById.initialize(client);
     const byId = (await getOrderById.execute({
       orderId: "gid://shopify/Order/1",
-    })) as { horizon: { oldest_visible_order_created_at: string | null } };
+    }, toolCtx(client))) as { horizon: { oldest_visible_order_created_at: string | null } };
     expect(byId.horizon.oldest_visible_order_created_at).toBe(
       "2026-07-10T12:00:00Z",
     );

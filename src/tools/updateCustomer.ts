@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { checkUserErrors, handleToolError } from "../lib/toolUtils.js";
+import { checkUserErrors, handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 // Input schema for updating a customer
 const UpdateCustomerInputSchema = z.object({
@@ -35,20 +34,12 @@ const UpdateCustomerInputSchema = z.object({
 
 type UpdateCustomerInput = z.infer<typeof UpdateCustomerInputSchema>;
 
-// Will be initialized in index.ts
-let shopifyClient: GraphQLClient;
-
 const updateCustomer = {
   name: "update-customer",
   description: "Update a customer's information",
   schema: UpdateCustomerInputSchema,
 
-  // Add initialize method to set up the GraphQL client
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: UpdateCustomerInput) => {
+  execute: async (input: UpdateCustomerInput, ctx: StoreContext) => {
     try {
       const { id, ...customerFields } = input;
 
@@ -104,7 +95,7 @@ const updateCustomer = {
         }
       };
 
-      const data = (await shopifyClient.request(query, variables)) as {
+      const data = (await ctx.client.request(query, variables)) as {
         customerUpdate: {
           customer: any;
           userErrors: Array<{

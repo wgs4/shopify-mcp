@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { handleToolError } from "../lib/toolUtils.js";
+import { handleToolError, type StoreContext } from "../lib/toolUtils.js";
 import {
   computeBreakdownTotals,
   explainPayoutAccessError,
@@ -66,8 +65,6 @@ const GetShopifyPayoutInputSchema = z.object({
 });
 
 type GetShopifyPayoutInput = z.infer<typeof GetShopifyPayoutInputSchema>;
-
-let shopifyClient: GraphQLClient;
 
 const PAYOUT_NODE_QUERY = gql`
   #graphql
@@ -147,18 +144,14 @@ const getShopifyPayout = {
     "Requires the `read_shopify_payments_payouts` and `read_shopify_payments_accounts` Custom App scopes.",
   schema: GetShopifyPayoutInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: GetShopifyPayoutInput) => {
+  execute: async (input: GetShopifyPayoutInput, ctx: StoreContext) => {
     try {
-      const shopDomain = process.env.MYSHOPIFY_DOMAIN ?? "";
+      const shopDomain = ctx.domain;
       const { gid, legacyId } = parsePayoutId(input.payout_id);
 
       let payoutData: { payoutNode: RawPayoutNode | null };
       try {
-        payoutData = (await shopifyClient.request(PAYOUT_NODE_QUERY, {
+        payoutData = (await ctx.client.request(PAYOUT_NODE_QUERY, {
           payoutGid: gid,
         })) as typeof payoutData;
       } catch (err) {
@@ -184,14 +177,18 @@ const getShopifyPayout = {
 
       let loaderResult;
       try {
-        loaderResult = await fetchBalanceTransactions(shopifyClient, {
-          legacyPayoutId: legacyId,
-          pageSize: input.transactions_limit,
-          maxTransactions: input.max_transactions,
-          startCursor: input.transactions_after,
-          autoPaginate: input.auto_paginate,
-          includeOrderNames: input.include_order_names,
-        });
+        loaderResult = await fetchBalanceTransactions(
+          ctx.client,
+          {
+            legacyPayoutId: legacyId,
+            pageSize: input.transactions_limit,
+            maxTransactions: input.max_transactions,
+            startCursor: input.transactions_after,
+            autoPaginate: input.auto_paginate,
+            includeOrderNames: input.include_order_names,
+          },
+          ctx,
+        );
       } catch (err) {
         throw explainPayoutAccessError(err);
       }

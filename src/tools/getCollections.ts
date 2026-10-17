@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { edgesToNodes, handleToolError } from "../lib/toolUtils.js";
+import { edgesToNodes, handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 const GetCollectionsInputSchema = z.object({
   first: z
@@ -20,19 +19,13 @@ const GetCollectionsInputSchema = z.object({
 });
 type GetCollectionsInput = z.infer<typeof GetCollectionsInputSchema>;
 
-let shopifyClient: GraphQLClient;
-
 const getCollections = {
   name: "get-collections",
   description:
     "Query collections (manual & smart) with optional filtering. Returns title, handle, products count, sort order, and rules for smart collections.",
   schema: GetCollectionsInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: GetCollectionsInput) => {
+  execute: async (input: GetCollectionsInput, ctx: StoreContext) => {
     try {
       const query = gql`
         #graphql
@@ -84,7 +77,7 @@ const getCollections = {
         variables.query = input.query;
       }
 
-      const data: any = await shopifyClient.request(query, variables);
+      const data: any = await ctx.client.request(query, variables);
       const collections = edgesToNodes(data.collections);
 
       return {

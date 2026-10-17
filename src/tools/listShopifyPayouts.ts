@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { handleToolError, type ShopifyConnection } from "../lib/toolUtils.js";
+import { handleToolError, type ShopifyConnection, type StoreContext } from "../lib/toolUtils.js";
 import {
   buildPayoutListQuery,
   explainPayoutAccessError,
@@ -48,21 +47,15 @@ const ListShopifyPayoutsInputSchema = z.object({
 
 type ListShopifyPayoutsInput = z.infer<typeof ListShopifyPayoutsInputSchema>;
 
-let shopifyClient: GraphQLClient;
-
 const listShopifyPayouts = {
   name: "shopify-list-payouts",
   description:
     "List Shopify Payments payouts for this store in a date window. Returns each payout's id, issued_at, status, net amount, summary (charges/refunds/fees), currency, and the admin URL for the payout page. Requires the `read_shopify_payments_payouts` Custom App scope.",
   schema: ListShopifyPayoutsInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: ListShopifyPayoutsInput) => {
+  execute: async (input: ListShopifyPayoutsInput, ctx: StoreContext) => {
     try {
-      const shopDomain = process.env.MYSHOPIFY_DOMAIN ?? "";
+      const shopDomain = ctx.domain;
       const queryStr = buildPayoutListQuery({
         since: input.since,
         until: input.until,
@@ -164,7 +157,7 @@ const listShopifyPayouts = {
         } | null;
       };
       try {
-        data = (await shopifyClient.request(query, variables)) as typeof data;
+        data = (await ctx.client.request(query, variables)) as typeof data;
       } catch (err) {
         throw explainPayoutAccessError(err);
       }

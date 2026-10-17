@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { edgesToNodes, handleToolError } from "../lib/toolUtils.js";
+import { edgesToNodes, handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 const GetCollectionByIdInputSchema = z.object({
   collectionId: z
@@ -22,19 +21,13 @@ const GetCollectionByIdInputSchema = z.object({
 });
 type GetCollectionByIdInput = z.infer<typeof GetCollectionByIdInputSchema>;
 
-let shopifyClient: GraphQLClient;
-
 const getCollectionById = {
   name: "get-collection-by-id",
   description:
     "Get a single collection with full details including products (paginated), rules for smart collections, SEO, and image",
   schema: GetCollectionByIdInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: GetCollectionByIdInput) => {
+  execute: async (input: GetCollectionByIdInput, ctx: StoreContext) => {
     try {
       const collectionId = input.collectionId.startsWith("gid://")
         ? input.collectionId
@@ -113,7 +106,7 @@ const getCollectionById = {
         }
       `;
 
-      const data: any = await shopifyClient.request(query, {
+      const data: any = await ctx.client.request(query, {
         id: collectionId,
         productsFirst,
       });

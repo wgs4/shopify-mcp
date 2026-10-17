@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { edgesToNodes, handleToolError } from "../lib/toolUtils.js";
+import { edgesToNodes, handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 const GetInventoryItemsInputSchema = z.object({
   productId: z
@@ -13,19 +12,13 @@ const GetInventoryItemsInputSchema = z.object({
 });
 type GetInventoryItemsInput = z.infer<typeof GetInventoryItemsInputSchema>;
 
-let shopifyClient: GraphQLClient;
-
 const getInventoryItems = {
   name: "get-inventory-items",
   description:
     "Get inventory item details for all variants of a product including SKU, cost, tracked status, country of origin, and HS codes",
   schema: GetInventoryItemsInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: GetInventoryItemsInput) => {
+  execute: async (input: GetInventoryItemsInput, ctx: StoreContext) => {
     try {
       const productId = input.productId.startsWith("gid://")
         ? input.productId
@@ -73,7 +66,7 @@ const getInventoryItems = {
         }
       `;
 
-      const data: any = await shopifyClient.request(query, { id: productId });
+      const data: any = await ctx.client.request(query, { id: productId });
 
       if (!data.product) {
         throw new Error(`Product not found: ${productId}`);

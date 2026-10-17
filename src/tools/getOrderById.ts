@@ -1,4 +1,3 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
 import { getAccessScopes } from "../lib/accessScopes.js";
@@ -8,7 +7,7 @@ import {
   getShopTimezone,
 } from "../lib/orderHistoryFetch.js";
 import { READ_ALL_ORDERS, horizonInfo } from "../lib/orderWall.js";
-import { handleToolError, edgesToNodes } from "../lib/toolUtils.js";
+import { handleToolError, edgesToNodes, type StoreContext } from "../lib/toolUtils.js";
 
 // Input schema for getOrderById
 const GetOrderByIdInputSchema = z.object({
@@ -17,28 +16,20 @@ const GetOrderByIdInputSchema = z.object({
 
 type GetOrderByIdInput = z.infer<typeof GetOrderByIdInputSchema>;
 
-// Will be initialized in index.ts
-let shopifyClient: GraphQLClient;
-
 const getOrderById = {
   name: "get-order-by-id",
   description: "Get a specific order by ID",
   schema: GetOrderByIdInputSchema,
 
-  // Add initialize method to set up the GraphQL client
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: GetOrderByIdInput) => {
+  execute: async (input: GetOrderByIdInput, ctx: StoreContext) => {
     try {
       const { orderId } = input;
 
-      const scopes = await getAccessScopes(shopifyClient);
-      const tz = await getShopTimezone(shopifyClient);
+      const scopes = await getAccessScopes(ctx.client);
+      const tz = await getShopTimezone(ctx.client);
       const horizon = horizonInfo(scopes, undefined, tz);
       horizon.oldest_visible_order_created_at =
-        await getOldestVisibleOrderCreatedAt(shopifyClient);
+        await getOldestVisibleOrderCreatedAt(ctx.client);
 
       const throwNotFound = (fallback: string): never => {
         if (horizon.scope_missing === READ_ALL_ORDERS) {
@@ -72,7 +63,7 @@ const getOrderById = {
             }
           }
         `;
-        const nameData = (await shopifyClient.request(nameQuery, {
+        const nameData = (await ctx.client.request(nameQuery, {
           query: `name:${orderName}`,
         })) as { orders: { edges: Array<{ node: { id: string } }> } };
 
@@ -208,7 +199,7 @@ const getOrderById = {
         id: resolvedId
       };
 
-      const data = (await shopifyClient.request(query, variables)) as {
+      const data = (await ctx.client.request(query, variables)) as {
         order: any;
       };
 
@@ -219,7 +210,7 @@ const getOrderById = {
       // Extract and format order data
       const order = data.order;
 
-      const base = formatOrderSummary(order);
+      const base = formatOrderSummary(order, ctx.domain);
       const formattedOrder = {
         ...base,
         customer: order.customer

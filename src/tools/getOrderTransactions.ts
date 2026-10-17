@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { handleToolError } from "../lib/toolUtils.js";
+import { handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 const GetOrderTransactionsInputSchema = z.object({
   orderId: z
@@ -15,19 +14,13 @@ type GetOrderTransactionsInput = z.infer<
   typeof GetOrderTransactionsInputSchema
 >;
 
-let shopifyClient: GraphQLClient;
-
 const getOrderTransactions = {
   name: "get-order-transactions",
   description:
     "Get all payment transactions for an order including authorizations, captures, refunds, and voids with gateway, status, and amounts",
   schema: GetOrderTransactionsInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: GetOrderTransactionsInput) => {
+  execute: async (input: GetOrderTransactionsInput, ctx: StoreContext) => {
     try {
       const orderId = input.orderId.startsWith("gid://")
         ? input.orderId
@@ -79,7 +72,7 @@ const getOrderTransactions = {
         }
       `;
 
-      const data: any = await shopifyClient.request(query, { id: orderId });
+      const data: any = await ctx.client.request(query, { id: orderId });
 
       if (!data.order) {
         throw new Error(`Order not found: ${orderId}`);

@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { edgesToNodes, handleToolError } from "../lib/toolUtils.js";
+import { edgesToNodes, handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 const GetLocationsInputSchema = z.object({
   includeInactive: z
@@ -19,19 +18,13 @@ const GetLocationsInputSchema = z.object({
 });
 type GetLocationsInput = z.infer<typeof GetLocationsInputSchema>;
 
-let shopifyClient: GraphQLClient;
-
 const getLocations = {
   name: "get-locations",
   description:
     "Get all inventory/fulfillment locations with addresses, capabilities, and active status",
   schema: GetLocationsInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: GetLocationsInput) => {
+  execute: async (input: GetLocationsInput, ctx: StoreContext) => {
     try {
       const query = gql`
         #graphql
@@ -80,7 +73,7 @@ const getLocations = {
         includeInactive: input.includeInactive ?? false,
       };
 
-      const data: any = await shopifyClient.request(query, variables);
+      const data: any = await ctx.client.request(query, variables);
       const locations = edgesToNodes(data.locations);
 
       return {

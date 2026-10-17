@@ -1,7 +1,6 @@
-import type { GraphQLClient } from "graphql-request";
 import { gql } from "graphql-request";
 import { z } from "zod";
-import { checkUserErrors, handleToolError } from "../lib/toolUtils.js";
+import { checkUserErrors, handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 // Input schema for deleteProduct
 const DeleteProductInputSchema = z.object({
@@ -10,19 +9,12 @@ const DeleteProductInputSchema = z.object({
 
 type DeleteProductInput = z.infer<typeof DeleteProductInputSchema>;
 
-// Will be initialized in index.ts
-let shopifyClient: GraphQLClient;
-
 const deleteProduct = {
   name: "delete-product",
   description: "Delete a product",
   schema: DeleteProductInputSchema,
 
-  initialize(client: GraphQLClient) {
-    shopifyClient = client;
-  },
-
-  execute: async (input: DeleteProductInput) => {
+  execute: async (input: DeleteProductInput, ctx: StoreContext) => {
     try {
       const query = gql`
         #graphql
@@ -38,7 +30,7 @@ const deleteProduct = {
         }
       `;
 
-      const data = (await shopifyClient.request(query, {
+      const data = (await ctx.client.request(query, {
         input: { id: input.id },
       })) as {
         productDelete: {
