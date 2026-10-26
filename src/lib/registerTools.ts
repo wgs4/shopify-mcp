@@ -75,6 +75,40 @@ export function registerShopifyTools(
   }
 }
 
+/**
+ * Tool names listed in SHOPIFY_MCP_DISABLED_TOOLS (comma-separated).
+ *
+ * Used by restricted deployments (the Fortin MCP for Jason Wilding hides
+ * refund-create, order-cancel, order-mark-as-paid and complete-draft-order,
+ * so write_orders lets him edit notes/tags but not move money).
+ */
+export function disabledToolNames(env: NodeJS.ProcessEnv = process.env): Set<string> {
+  return new Set(
+    (env.SHOPIFY_MCP_DISABLED_TOOLS ?? "")
+      .split(",")
+      .map((name) => name.trim())
+      .filter((name) => name.length > 0),
+  );
+}
+
+/**
+ * Drop disabled tools. Fails closed: a name that matches no tool throws, so a
+ * typo can never leave a tool exposed that the deployment meant to hide.
+ */
+export function withoutDisabledTools(
+  toolList: readonly ShopifyTool[],
+  disabled: ReadonlySet<string>,
+): ShopifyTool[] {
+  const known = new Set(toolList.map((tool) => tool.name));
+  const unknown = [...disabled].filter((name) => !known.has(name)).sort();
+  if (unknown.length > 0) {
+    throw new Error(
+      `SHOPIFY_MCP_DISABLED_TOOLS names unknown tools: ${unknown.join(", ")}`,
+    );
+  }
+  return toolList.filter((tool) => !disabled.has(tool.name));
+}
+
 export function createShopifyMcpServer(options: ToolRegistration): McpServer {
   const server = new McpServer({
     name: "shopify",
@@ -82,6 +116,6 @@ export function createShopifyMcpServer(options: ToolRegistration): McpServer {
     description:
       "MCP Server for Shopify API, enabling interaction with store data through GraphQL API",
   });
-  registerShopifyTools(server, tools, options);
+  registerShopifyTools(server, withoutDisabledTools(tools, disabledToolNames()), options);
   return server;
 }
