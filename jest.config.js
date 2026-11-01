@@ -27,7 +27,7 @@ const config = {
   ...presetConfig,
   testEnvironment: "node",
   // Match TS test files only; don't pick up compiled .js or random fixtures.
-  testMatch: ["<rootDir>/src/**/*.test.ts"],
+  testMatch: ["<rootDir>/src/**/*.test.ts", "<rootDir>/tests/**/*.test.ts"],
   // Map import paths like "./foo.js" -> "./foo" so ts-jest resolves the
   // .ts source under NodeNext-style ESM imports.
   moduleNameMapper: {
