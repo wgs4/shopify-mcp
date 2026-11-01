@@ -2,7 +2,7 @@
 
 (please leave a star if you like!)
 
-MCP Server for Shopify API, enabling interaction with store data through GraphQL API. This server provides **50 tools** (see `src/tools/registry.ts`) for managing products, customers, orders, and more.
+MCP Server for Shopify API, enabling interaction with store data through GraphQL API. This server provides **51 tools** (see `src/tools/registry.ts`) for managing products, customers, orders, and more.
 
 **📦 Package Name: `shopify-mcp`**
 **🚀 Command: `shopify-mcp` (NOT `shopify-mcp-server`)**
@@ -15,7 +15,7 @@ MCP Server for Shopify API, enabling interaction with store data through GraphQL
 
 - **Product Management**: Full CRUD for products, variants, and options (8 tools)
 - **Customer Management**: Full CRUD, merge, and address management (8 tools)
-- **Order Management**: Smart lookup, cancel, close/open, mark as paid, fulfillment, refunds, draft orders (11 tools)
+- **Order Management**: Smart lookup, placed-order line edits with dry-run previews, cancel, close/open, mark as paid, fulfillment, refunds, draft orders (12 tools)
 - **Fulfillment Orders**: Read fulfillment orders (throws `MissingScopeError` without the FO scopes; counted in Order Management)
 - **Product Order History**: Per-SKU / per-product unit counts on each event's own clock, fail-closed at the 60-day order wall (1 tool)
 - **Metafield Management**: Get, set, and delete metafields on any resource (3 tools)
@@ -48,6 +48,7 @@ As of January 1, 2026, new Shopify apps are created in the **Dev Dashboard** and
    - `read_products`, `write_products`
    - `read_customers`, `write_customers`
    - `read_orders`, `write_orders`
+   - `write_order_edits` (required for `order-edit`, including dry-run staging; `write_orders` alone does not grant order edits)
    - `read_all_orders` (optional but recommended: without it Shopify hides orders older than 60 days, and this server fails closed with `ScopeHorizonError` instead of returning empty results)
    - `read_returns` (optional but recommended: without it, `units_returned` is null)
    - `read_merchant_managed_fulfillment_orders`, `read_assigned_fulfillment_orders`, `read_third_party_fulfillment_orders` (optional but recommended: needed for fulfillment-order reads and the unfulfilled cross-check)
@@ -175,7 +176,7 @@ shopify-mcp --clientId=<ID> --clientSecret=<SECRET> --domain=<YOUR_SHOP>.myshopi
 
 ### Multiple stores in one process
 
-Set `SHOPIFY_STORES` to serve every store from one process. Each of the 50 tools then takes a required `store` argument (`wgs`, `allpedal`, and so on). There is no default. Leave `SHOPIFY_STORES` unset to keep today's single-store setup: the same tool schemas, with no `store` argument.
+Set `SHOPIFY_STORES` to serve every store from one process. Each of the 51 tools then takes a required `store` argument (`wgs`, `allpedal`, and so on). There is no default. Leave `SHOPIFY_STORES` unset to keep today's single-store setup: the same tool schemas, with no `store` argument.
 
 ```
 SHOPIFY_CLIENT_ID=shared_client_id
@@ -189,7 +190,7 @@ A store on a different app can override the shared credentials with `SHOPIFY_CLI
 
 Each store's access token is fetched on first use and refreshed on its own. If one store fails to authenticate, that tool call returns an error naming the store. The other stores keep working.
 
-## Available Tools (50)
+## Available Tools (51)
 
 ### Pagination, Sorting & Filtering
 
@@ -377,7 +378,7 @@ All list query tools (`get-products`, `get-customers`, `get-orders`, `get-custom
      - `address` (object, optional): Address fields (required for create/update): `address1`, `address2`, `city`, `company`, `countryCode`, `firstName`, `lastName`, `phone`, `provinceCode`, `zip`
      - `setAsDefault` (boolean, optional): Set as customer's default address
 
-### Order Management (11 tools)
+### Order Management (12 tools)
 
 ### The 60-day order wall
 
@@ -485,6 +486,33 @@ Successful responses from those three tools include a `horizon` block: `wall_day
     - Inputs:
       - `orderId` (string, required): Order GID or numeric id
     - Throws `MissingScopeError` when the token lacks the fulfillment-order scopes (`read_merchant_managed_fulfillment_orders`, `read_assigned_fulfillment_orders`, `read_third_party_fulfillment_orders`)
+
+12. **`order-edit`**
+
+    - Change line items on a placed order using Shopify's begin → add → set quantity → commit workflow. Requires `write_order_edits`; missing scopes fail before an edit session begins. The framework supplies the `store` argument in multi-store mode.
+    - Inputs:
+      - Exactly one of `orderId` (string: order GID or numeric ID) or `orderName` (string: exact name, such as `#30965` or `30965`). Name lookup must find exactly one order.
+      - `add` (optional array): `{ variantId?: string, sku?: string, quantity: number }`. Exactly one of variant GID or SKU, with a positive integer quantity. SKUs must resolve to exactly one variant; ambiguous results list the matches. Adds use `allowDuplicates: false`.
+      - `setQuantity` (optional array): `{ lineItemId?: string, sku?: string, quantity: number }`. Exactly one of original line-item GID or SKU; quantity is a nonnegative integer, with `0` removing the line. A SKU must match exactly one current line with quantity greater than zero.
+      - At least one non-empty `add` or `setQuantity` is required. To swap a variant, add the replacement and set the original line's quantity to zero.
+      - `restock` (boolean, default: **true**): Restock reduced or removed quantities.
+      - `notifyCustomer` (boolean, default: **false**): Notify the customer when committing.
+      - `staffNote` (optional string): Internal commit note, passed verbatim.
+      - `commit` (boolean, default: **false**): Stage a fresh edit session and preview changes. Re-run with `commit: true` to apply them in a new session. An uncommitted calculated order simply expires.
+    - Refuses cancelled orders and all quantity edits on partially or fully fulfilled lines. Unchanged fulfilled lines may remain on the order. Shopify's own editing restrictions and mutation errors also apply.
+    - Returns `before` and `after` line items and money totals, a `lineTable` with before/after quantities, and `payment` with Shopify's `totalOutstanding`. Existing and newly added line items are paginated so previews include every line. Totals use shop currency and current order totals; staged tax is summed from Shopify's calculated tax lines.
+    - If reading additional lines fails after a successful commit, returns `committed: true`, a warning, and `after.lineItemsComplete: false`; unread table quantities are `null`. A failed commit request reports an unknown result: read the order before retrying because it may already have been applied.
+    - **A nonzero outstanding balance produces a warning: the customer owes payment (positive) or is owed money (negative). This tool does not collect payment or issue refunds.** Dry-run balances are projections.
+
+    Example variant swap (dry run):
+
+    ```json
+    {
+      "orderName": "#30965",
+      "add": [{ "sku": "REPLACEMENT-SKU", "quantity": 1 }],
+      "setQuantity": [{ "sku": "ORIGINAL-SKU", "quantity": 0 }]
+    }
+    ```
 
 ### Product Order History (1 tool)
 

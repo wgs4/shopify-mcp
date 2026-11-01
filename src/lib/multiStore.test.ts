@@ -80,7 +80,7 @@ describe("single-store tool schemas", () => {
     const server = createShopifyMcpServer({ mode: "single", context });
     expect(serverName(server)).toBe("shopify");
     const registered = registeredTools(server);
-    expect(Object.keys(registered)).toHaveLength(50);
+    expect(Object.keys(registered)).toHaveLength(51);
 
     for (const tool of tools) {
       const entry = registered[tool.name];

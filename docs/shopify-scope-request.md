@@ -21,6 +21,7 @@ Missing = everything in the table below.
 | Scope | Unlocks | Required by |
 |---|---|---|
 | `read_all_orders` | Orders older than 60 days (cursor and bulk) | PRD R1; `get-product-order-history` history before the wall; `get-orders` date filters |
+| `write_order_edits` | Stage and commit line-item changes on placed orders | `order-edit` (including dry runs); `write_orders` alone is insufficient |
 | `read_returns` | `Order.returns` (physical returns, distinct from refunds) | PRD R7 `units_returned` |
 | `read_merchant_managed_fulfillment_orders` | `Order.fulfillmentOrders` for merchant-fulfilled orders | PRD R4 unfulfilled cross-check; `get-fulfillment-orders` (broken today) |
 | `read_assigned_fulfillment_orders` | Fulfillment orders assigned to fulfillment services | same |
@@ -31,7 +32,14 @@ permissions): "By default, you have access to the last 60 days' worth of orders
 for a store. To access all the orders, you need to request access to the
 `read_all_orders` scope." The request is made from the Partner Dashboard:
 Apps > (the app) > API access > "Read all orders scope" card > Request access.
-The other four scopes are ordinary scopes and can be added directly.
+The other five scopes are ordinary scopes and can be added directly.
+
+`write_order_edits` was added to this request on 2026-10-31 for the placed-order
+editing tool. It is not evidence of a grant or deployment. `order-edit` checks
+the current app installation's scopes and reports "app is missing
+write_order_edits" before staging if the grant is absent. Dry runs still need
+this scope because they create and stage an uncommitted edit session.
+See [Shopify's order-editing guide](https://shopify.dev/docs/apps/build/orders-fulfillment/order-management-apps/edit-orders).
 
 ## Justification text (paste into the request form)
 
@@ -46,7 +54,7 @@ The other four scopes are ordinary scopes and can be added directly.
 
 ## Rollout runbook (one maintenance window, all four stores)
 
-1. In the Partner/Dev Dashboard, add the five scopes to the app configuration
+1. In the Partner/Dev Dashboard, add the six scopes to the app configuration
    and submit the `read_all_orders` access request. Wait for approval.
 2. Re-install / re-authorize the app on each of the four stores so the new
    scopes take effect. Do all four in the same window; the app is shared.
@@ -62,6 +70,12 @@ The other four scopes are ordinary scopes and can be added directly.
    `since: "2025-01-01"`, `until: "2025-12-31"`. Expected: shipped minus
    returned reconciles to the 64 net items ShopifyQL reports for 2025, and the
    refund line items account for the $227.50 (Feb) and $276.25 (May) returns.
+6. For placed-order editing, verify `write_order_edits` appears in
+   `currentAppInstallation { accessScopes { handle } }` for each intended store.
+   A subsequent approved dry run should return the staged before/after preview
+   without committing. Payment collection and refunds remain separate actions.
+   Restricted deployments can hide `order-edit` with
+   `SHOPIFY_MCP_DISABLED_TOOLS` even when the app has the scope.
 
 ## Rollback
 

@@ -19,7 +19,7 @@ const singleContext: StoreContext = {
 };
 
 describe("tool registry MCP registration", () => {
-  test("registers 50 uniquely named tools with non-empty descriptions", () => {
+  test("registers 51 uniquely named tools with non-empty descriptions", () => {
     const server = createShopifyMcpServer({ mode: "single", context: singleContext });
 
     const registered = (server as unknown as {
@@ -31,9 +31,10 @@ describe("tool registry MCP registration", () => {
     expect(history.description && history.description.length > 0).toBe(true);
 
     const names = Object.keys(registered);
-    expect(names).toHaveLength(50);
-    expect(new Set(names).size).toBe(50);
-    expect(tools).toHaveLength(50);
+    expect(names).toHaveLength(51);
+    expect(new Set(names).size).toBe(51);
+    expect(tools).toHaveLength(51);
+    expect(registered["order-edit"]).toBeDefined();
 
     for (const tool of tools) {
       const entry = registered[tool.name];

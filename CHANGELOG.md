@@ -3,6 +3,18 @@
 All notable changes to this project are documented here.
 The format follows Keep a Changelog; versions follow package.json.
 
+## [1.4.0] - 2026-10-31
+
+### Added
+- `order-edit`: add variants, swap items, or set quantities on placed orders through Shopify's order-edit workflow. Defaults to a fresh, uncommitted dry run and customer notification off; `commit: true` applies changes. Returns before/after lines, current money totals, and explicit outstanding payment/refund warnings without collecting payment or refunding.
+- Exact order-name and SKU resolution with ambiguity errors, pagination of order and calculated line items, cancelled/fulfilled-line guards, and a fail-fast `write_order_edits` scope check.
+- Commit-aware errors: failed reads after a successful commit retain `committed: true` and mark incomplete output; an uncertain commit response requires re-reading the order before retrying.
+- Mocked Jest coverage for staging, commit order, SKU resolution, refusals, mutation errors, defaults, pagination, and outstanding balances.
+
+### Changed
+- Package minor version is now 1.4.0; registry and README list 51 tools.
+- Scope request runbook now includes `write_order_edits` and re-authorization steps. No scope grant or deployment is implied.
+
 ## [1.3.0] - 2026-09-03
 
 ### Added
