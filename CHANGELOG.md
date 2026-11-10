@@ -3,6 +3,12 @@
 All notable changes to this project are documented here.
 The format follows Keep a Changelog; versions follow package.json.
 
+## [1.5.0] - 2026-11-09
+
+### Added
+- `get-order-timeline` reads the current order note, staff comments, and Shopify email-send events. Enable it with `SHOPIFY_MCP_ENABLE_ORDER_TIMELINE=true` on authorized deployments.
+- `get-order-returns` reads Shopify return status, inbound tracking, and label presence. It supports pagination through nested return shipments and identifies incomplete tracking coverage.
+
 ## [1.4.0] - 2026-10-31
 
 ### Added
