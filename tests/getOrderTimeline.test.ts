@@ -384,20 +384,19 @@ describe("get-order-timeline fail-closed response and error handling", () => {
       getOrderTimeline.execute({ orderId: ORDER_GID }, nullCursorCtx),
     ).rejects.toThrow(/hasNextPage=true without a new endCursor/);
 
-    const { ctx: stuckCursorCtx } = createHarness({
-      order: makeOrderPayload({
-        events: {
-          edges: [{ node: makeBasicEvent() }],
-          pageInfo: { hasNextPage: true, endCursor: "same-cursor" },
-        },
-      }),
-    });
-    await expect(
-      getOrderTimeline.execute(
-        { orderId: ORDER_GID, after: "same-cursor" },
-        stuckCursorCtx,
-      ),
-    ).rejects.toThrow(/hasNextPage=true without a new endCursor/);
+    for (const endCursor of ["same-cursor", " same-cursor ", "x".repeat(1025)]) {
+      const { ctx } = createHarness({
+        order: makeOrderPayload({
+          events: {
+            edges: [{ node: makeBasicEvent() }],
+            pageInfo: { hasNextPage: true, endCursor },
+          },
+        }),
+      });
+      await expect(
+        getOrderTimeline.execute({ orderId: ORDER_GID, after: "same-cursor" }, ctx),
+      ).rejects.toThrow(/hasNextPage=true without a new endCursor/);
+    }
   });
 
   test("preserves GraphQL auth/access errors via standard tool error handling without claiming an exact scope", async () => {

@@ -3,6 +3,10 @@ import { z } from "zod";
 import { handleToolError, type StoreContext } from "../lib/toolUtils.js";
 
 const ORDER_ID_REGEX = /^(?:gid:\/\/shopify\/Order\/)?[1-9]\d*$/;
+const CursorSchema = z.string().min(1).max(1024).refine(
+  (cursor) => cursor.trim() === cursor,
+  "Cursor must be copied verbatim without surrounding whitespace",
+);
 
 const GetOrderTimelineInputSchema = z.object({
   orderId: z
@@ -14,7 +18,7 @@ const GetOrderTimelineInputSchema = z.object({
     )
     .describe('Placed Shopify Order numeric ID or Order GID ("gid://shopify/Order/8054938337547").'),
   limit: z.number().int().min(1).max(50).default(25).describe("Maximum number of timeline events per page (1-50, default 25)"),
-  after: z.string().trim().min(1).max(1024).optional().describe("Opaque pagination cursor from pageInfo.endCursor"),
+  after: CursorSchema.optional().describe("Opaque pagination cursor from pageInfo.endCursor"),
   includeComments: z.boolean().default(true).describe('Include staff CommentEvent entries (false passes query="comments:false")'),
   reverse: z.boolean().default(false).describe("Reverse chronological sort order (false = oldest first, true = newest first)"),
 });
@@ -106,8 +110,8 @@ export const getOrderTimeline = {
         throw new Error(`Malformed or missing events page in Shopify response for ${id}.`);
       }
 
-      const rawCursor = connection.pageInfo.endCursor;
-      const endCursor = typeof rawCursor === "string" && rawCursor.trim().length > 0 ? rawCursor : null;
+      const cursor = CursorSchema.safeParse(connection.pageInfo.endCursor);
+      const endCursor = cursor.success ? cursor.data : null;
       if (connection.pageInfo.hasNextPage && (!endCursor || endCursor === input.after)) {
         throw new Error(`Order timeline pagination for ${id} reported hasNextPage=true without a new endCursor.`);
       }
