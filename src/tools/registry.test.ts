@@ -19,8 +19,8 @@ const singleContext: StoreContext = {
 };
 
 describe("tool registry MCP registration", () => {
-  test("registers 51 uniquely named tools with non-empty descriptions", () => {
-    const server = createShopifyMcpServer({ mode: "single", context: singleContext });
+  test("registers 51 baseline tools by default and keeps get-order-timeline opt-in", () => {
+    const server = createShopifyMcpServer({ mode: "single", context: singleContext }, {});
 
     const registered = (server as unknown as {
       _registeredTools: Record<string, { description?: string }>;
@@ -33,17 +33,44 @@ describe("tool registry MCP registration", () => {
     const names = Object.keys(registered);
     expect(names).toHaveLength(51);
     expect(new Set(names).size).toBe(51);
-    expect(tools).toHaveLength(51);
+    expect(tools).toHaveLength(52);
     expect(registered["order-edit"]).toBeDefined();
+    expect(registered["get-order-timeline"]).toBeUndefined();
 
     for (const tool of tools) {
+      expect(typeof tool.description).toBe("string");
+      expect(tool.description.length).toBeGreaterThan(0);
+      if (tool.name === "get-order-timeline") continue;
       const entry = registered[tool.name];
       expect(entry).toBeDefined();
       expect(typeof entry.description).toBe("string");
       expect(entry.description && entry.description.length > 0).toBe(true);
-      expect(typeof tool.description).toBe("string");
-      expect(tool.description.length).toBeGreaterThan(0);
     }
+  });
+
+  test("registers get-order-timeline only when SHOPIFY_MCP_ENABLE_ORDER_TIMELINE=true and disable list wins", () => {
+    const enabledServer = createShopifyMcpServer(
+      { mode: "single", context: singleContext },
+      { SHOPIFY_MCP_ENABLE_ORDER_TIMELINE: "true" },
+    );
+    const enabledRegistered = (enabledServer as unknown as {
+      _registeredTools: Record<string, { description?: string }>;
+    })._registeredTools;
+    expect(Object.keys(enabledRegistered)).toHaveLength(52);
+    expect(enabledRegistered["get-order-timeline"]).toBeDefined();
+
+    const deniedServer = createShopifyMcpServer(
+      { mode: "single", context: singleContext },
+      {
+        SHOPIFY_MCP_ENABLE_ORDER_TIMELINE: "true",
+        SHOPIFY_MCP_DISABLED_TOOLS: "get-order-timeline",
+      },
+    );
+    const deniedRegistered = (deniedServer as unknown as {
+      _registeredTools: Record<string, { description?: string }>;
+    })._registeredTools;
+    expect(Object.keys(deniedRegistered)).toHaveLength(51);
+    expect(deniedRegistered["get-order-timeline"]).toBeUndefined();
   });
 
   test("get-orders query is capped at 4096 characters", () => {

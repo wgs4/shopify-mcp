@@ -109,13 +109,20 @@ export function withoutDisabledTools(
   return toolList.filter((tool) => !disabled.has(tool.name));
 }
 
-export function createShopifyMcpServer(options: ToolRegistration): McpServer {
+export function createShopifyMcpServer(
+  options: ToolRegistration,
+  env: NodeJS.ProcessEnv = process.env,
+): McpServer {
   const server = new McpServer({
     name: "shopify",
     version: "1.0.0",
     description:
       "MCP Server for Shopify API, enabling interaction with store data through GraphQL API",
   });
-  registerShopifyTools(server, withoutDisabledTools(tools, disabledToolNames()), options);
+  const enableOrderTimeline = env.SHOPIFY_MCP_ENABLE_ORDER_TIMELINE === "true";
+  const activeTools = withoutDisabledTools(tools, disabledToolNames(env)).filter(
+    (tool) => enableOrderTimeline || tool.name !== "get-order-timeline",
+  );
+  registerShopifyTools(server, activeTools, options);
   return server;
 }
