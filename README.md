@@ -2,7 +2,7 @@
 
 (please leave a star if you like!)
 
-MCP Server for Shopify API, enabling interaction with store data through GraphQL API. This server provides **51 tools** (see `src/tools/registry.ts`) for managing products, customers, orders, and more.
+MCP Server for Shopify API, enabling interaction with store data through GraphQL API. This server provides **53 tools** (see `src/tools/registry.ts`) for managing products, customers, orders, and more.
 
 **📦 Package Name: `shopify-mcp`**
 **🚀 Command: `shopify-mcp` (NOT `shopify-mcp-server`)**
@@ -15,7 +15,7 @@ MCP Server for Shopify API, enabling interaction with store data through GraphQL
 
 - **Product Management**: Full CRUD for products, variants, and options (8 tools)
 - **Customer Management**: Full CRUD, merge, and address management (8 tools)
-- **Order Management**: Smart lookup, placed-order line edits with dry-run previews, cancel, close/open, mark as paid, fulfillment, refunds, draft orders (12 tools)
+- **Order Management**: Smart lookup, order timeline, staff comments and return tracking, placed-order line edits with dry-run previews, cancel, close/open, mark as paid, fulfillment, refunds, draft orders (14 tools)
 - **Fulfillment Orders**: Read fulfillment orders (throws `MissingScopeError` without the FO scopes; counted in Order Management)
 - **Product Order History**: Per-SKU / per-product unit counts on each event's own clock, fail-closed at the 60-day order wall (1 tool)
 - **Metafield Management**: Get, set, and delete metafields on any resource (3 tools)
@@ -176,7 +176,7 @@ shopify-mcp --clientId=<ID> --clientSecret=<SECRET> --domain=<YOUR_SHOP>.myshopi
 
 ### Multiple stores in one process
 
-Set `SHOPIFY_STORES` to serve every store from one process. Each of the 51 tools then takes a required `store` argument (`wgs`, `allpedal`, and so on). There is no default. Leave `SHOPIFY_STORES` unset to keep today's single-store setup: the same tool schemas, with no `store` argument.
+Set `SHOPIFY_STORES` to serve every store from one process. Each registered tool then takes a required `store` argument (`wgs`, `allpedal`, and so on). There is no default. Leave `SHOPIFY_STORES` unset to keep today's single-store setup: the same tool schemas, with no `store` argument.
 
 ```
 SHOPIFY_CLIENT_ID=shared_client_id
@@ -190,7 +190,7 @@ A store on a different app can override the shared credentials with `SHOPIFY_CLI
 
 Each store's access token is fetched on first use and refreshed on its own. If one store fails to authenticate, that tool call returns an error naming the store. The other stores keep working.
 
-## Available Tools (51)
+## Available Tools (53)
 
 ### Pagination, Sorting & Filtering
 
@@ -378,7 +378,7 @@ All list query tools (`get-products`, `get-customers`, `get-orders`, `get-custom
      - `address` (object, optional): Address fields (required for create/update): `address1`, `address2`, `city`, `company`, `countryCode`, `firstName`, `lastName`, `phone`, `provinceCode`, `zip`
      - `setAsDefault` (boolean, optional): Set as customer's default address
 
-### Order Management (12 tools)
+### Order Management (14 tools)
 
 ### The 60-day order wall
 
@@ -513,6 +513,21 @@ Successful responses from those three tools include a `horizon` block: `wall_day
       "setQuantity": [{ "sku": "ORIGINAL-SKU", "quantity": 0 }]
     }
     ```
+
+13. **`get-order-timeline`** *(opt-in via `SHOPIFY_MCP_ENABLE_ORDER_TIMELINE=true`)*
+
+    - Read the current order Note and the Timeline entries visible to the Shopify app. Staff comments include their raw text when available. The formatted message preserves RMA links as Shopify returned them. The current Note is a snapshot.
+    - Pass a placed-order GID or numeric `orderId` and `store` in multi-store mode. `limit` defaults to 25 (range 1–50). Copy `pageInfo.endCursor` verbatim into `after` for the next page. Use `reverse` for newest first and `includeComments: false` for system events only.
+    - `isMailSent` marks a Shopify `BasicEvent` whose action is exactly `mail_sent`. This records a send. Recipient delivery is unknown.
+    - Enable the tool only on deployments that should expose staff comments. `SHOPIFY_MCP_DISABLED_TOOLS` takes precedence. Requires order read access. Older orders may need `read_all_orders`.
+
+14. **`get-order-returns`**
+
+    - Read the order's return status and inbound tracking Shopify recorded on reverse deliveries. The result includes carrier, tracking number or URL, and label presence when available.
+    - Pass `orderId` as a placed-order GID or numeric ID and `store` in multi-store mode. `limit` defaults to 5 (range 1–5). To continue, pass `after` from the relevant `pageInfo.endCursor`. Add `returnId` to page that return's reverse fulfillment orders or `reverseFulfillmentOrderId` to page its reverse deliveries. The tool checks that the selected record belongs to the order.
+    - The first page expands up to three reverse fulfillment orders per return and three reverse deliveries per reverse fulfillment order. Nested lists include their own `pageInfo` so they can be continued independently.
+    - `summary.hasInboundTracking` is `true` when this result includes a tracking number or URL, `false` when a complete order read finds neither, and `null` when coverage is partial and no tracking was seen. Shopify may have no record of a self-shipped return. Physical receipt requires separate evidence.
+    - Requires Shopify order and return read access (typically `read_orders` and `read_returns`). Older orders may need `read_all_orders`. Shopify access errors are surfaced to the caller.
 
 ### Product Order History (1 tool)
 

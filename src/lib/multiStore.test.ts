@@ -11,6 +11,8 @@ import type { StoreCredential } from "./storeConfig.js";
 import type { StoreContext } from "./toolUtils.js";
 import { tools } from "../tools/registry.js";
 
+const BASELINE_TOOLS = tools.filter((tool) => tool.name !== "get-order-timeline");
+
 const STORES: StoreCredential[] = [
   {
     key: "wgs",
@@ -77,12 +79,13 @@ describe("single-store tool schemas", () => {
       getAccessToken: () => "static",
       apiVersion: "2026-01",
     };
-    const server = createShopifyMcpServer({ mode: "single", context });
+    const server = createShopifyMcpServer({ mode: "single", context }, {});
     expect(serverName(server)).toBe("shopify");
     const registered = registeredTools(server);
-    expect(Object.keys(registered)).toHaveLength(51);
+    expect(Object.keys(registered)).toHaveLength(52);
+    expect(registered["get-order-timeline"]).toBeUndefined();
 
-    for (const tool of tools) {
+    for (const tool of BASELINE_TOOLS) {
       const entry = registered[tool.name];
       expect(entry.description).toBe(tool.description);
       expect(entry.inputSchema.shape.store).toBeUndefined();
@@ -94,10 +97,10 @@ describe("single-store tool schemas", () => {
 });
 
 describe("multi-store tool schemas and routing", () => {
-  function setup(fetchImpl: typeof fetch) {
+  function setup(fetchImpl: typeof fetch, env: NodeJS.ProcessEnv = {}) {
     const registry = new StoreRegistry(STORES, "2026-01", { fetchImpl });
     registries.push(registry);
-    const server = createShopifyMcpServer({ mode: "multi", registry });
+    const server = createShopifyMcpServer({ mode: "multi", registry }, env);
     return { server, registry, tools: registeredTools(server) };
   }
 
@@ -106,9 +109,9 @@ describe("multi-store tool schemas and routing", () => {
       throw new Error("schema inspection must not fetch");
     });
     expect(serverName(server)).toBe("shopify");
-    expect(Object.keys(registered)).toHaveLength(tools.length);
+    expect(Object.keys(registered)).toHaveLength(BASELINE_TOOLS.length);
 
-    for (const tool of tools) {
+    for (const tool of BASELINE_TOOLS) {
       const entry = registered[tool.name];
       expect(entry.description).toBe(tool.description);
       const storeField = entry.inputSchema.shape.store;
@@ -128,15 +131,18 @@ describe("multi-store tool schemas and routing", () => {
     }
   });
 
-  test("missing or unknown store is rejected before any request", async () => {
+  test("missing or unknown store is rejected before any request", () => {
     const fetchImpl = jest.fn(async () => {
       throw new Error("request should not run");
     });
     const { tools: registered } = setup(fetchImpl);
     const callback = registered["get-shop-info"].callback;
-    await expect(callback({}, {})).rejects.toThrow(/Invalid store/);
-    await expect(callback({ store: "nope" }, {})).rejects.toThrow(/Invalid store "nope"/);
-    expect(fetchImpl).not.toHaveBeenCalled();
+    return Promise.all([
+      expect(callback({}, {})).rejects.toThrow(/Invalid store/),
+      expect(callback({ store: "nope" }, {})).rejects.toThrow(/Invalid store "nope"/),
+    ]).then(() => {
+      expect(fetchImpl).not.toHaveBeenCalled();
+    });
   });
 
   test("a call routes to that store's domain with that store's token", async () => {
