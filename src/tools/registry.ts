@@ -55,6 +55,7 @@ import { getOrderTransactions } from "./getOrderTransactions.js";
 import { getFulfillmentOrders } from "./getFulfillmentOrders.js";
 import { getOrderRefundDetails } from "./getOrderRefundDetails.js";
 import { getOrderTimeline } from "./getOrderTimeline.js";
+import { getOrderReturns } from "./getOrderReturns.js";
 import { getCollectionById } from "./getCollectionById.js";
 
 // Inventory & pricing read tools
@@ -117,11 +118,12 @@ export const tools: ShopifyTool[] = [
   getLocations,
   getMarkets,
   getCollections,
-  // Enhanced order & fulfillment (5)
+  // Enhanced order & fulfillment (6)
   getOrderTransactions,
   getFulfillmentOrders,
   getOrderRefundDetails,
   getOrderTimeline,
+  getOrderReturns,
   getCollectionById,
   // Inventory & pricing reads (4)
   getInventoryLevels,

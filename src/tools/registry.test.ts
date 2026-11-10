@@ -19,7 +19,7 @@ const singleContext: StoreContext = {
 };
 
 describe("tool registry MCP registration", () => {
-  test("registers 51 baseline tools by default and keeps get-order-timeline opt-in", () => {
+  test("registers 52 baseline tools by default and keeps get-order-timeline opt-in", () => {
     const server = createShopifyMcpServer({ mode: "single", context: singleContext }, {});
 
     const registered = (server as unknown as {
@@ -31,10 +31,11 @@ describe("tool registry MCP registration", () => {
     expect(history.description && history.description.length > 0).toBe(true);
 
     const names = Object.keys(registered);
-    expect(names).toHaveLength(51);
-    expect(new Set(names).size).toBe(51);
-    expect(tools).toHaveLength(52);
+    expect(names).toHaveLength(52);
+    expect(new Set(names).size).toBe(52);
+    expect(tools).toHaveLength(53);
     expect(registered["order-edit"]).toBeDefined();
+    expect(registered["get-order-returns"]).toBeDefined();
     expect(registered["get-order-timeline"]).toBeUndefined();
 
     for (const tool of tools) {
@@ -56,7 +57,7 @@ describe("tool registry MCP registration", () => {
     const enabledRegistered = (enabledServer as unknown as {
       _registeredTools: Record<string, { description?: string }>;
     })._registeredTools;
-    expect(Object.keys(enabledRegistered)).toHaveLength(52);
+    expect(Object.keys(enabledRegistered)).toHaveLength(53);
     expect(enabledRegistered["get-order-timeline"]).toBeDefined();
 
     const deniedServer = createShopifyMcpServer(
@@ -69,7 +70,7 @@ describe("tool registry MCP registration", () => {
     const deniedRegistered = (deniedServer as unknown as {
       _registeredTools: Record<string, { description?: string }>;
     })._registeredTools;
-    expect(Object.keys(deniedRegistered)).toHaveLength(51);
+    expect(Object.keys(deniedRegistered)).toHaveLength(52);
     expect(deniedRegistered["get-order-timeline"]).toBeUndefined();
   });
 

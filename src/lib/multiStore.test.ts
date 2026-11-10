@@ -82,7 +82,7 @@ describe("single-store tool schemas", () => {
     const server = createShopifyMcpServer({ mode: "single", context }, {});
     expect(serverName(server)).toBe("shopify");
     const registered = registeredTools(server);
-    expect(Object.keys(registered)).toHaveLength(51);
+    expect(Object.keys(registered)).toHaveLength(52);
     expect(registered["get-order-timeline"]).toBeUndefined();
 
     for (const tool of BASELINE_TOOLS) {
